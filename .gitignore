@@ -1,0 +1,19 @@
+# Build / tooling
+/.lake
+/.claude
+/.codex
+/.mcp.json
+/AGENTS.md
+/CLAUDE.md
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated docs
+/docs/report.pdf

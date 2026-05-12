@@ -1,0 +1,19 @@
+name = "FwPython"
+version = "0.1.0"
+description = "Lean 4 formalization of a small object-oriented language and its gradual extension."
+keywords = ["programming-languages", "type-systems", "gradual-typing", "metatheory"]
+license = "MIT"
+defaultTargets = ["FwPython", "FwPythonExamples"]
+
+[[require]]
+name = "aesop"
+scope = "leanprover-community"
+
+[leanOptions]
+pp.unicode.fun = true # pretty-prints `fun a ↦ b`
+
+[[lean_lib]]
+name = "FwPython"
+
+[[lean_lib]]
+name = "FwPythonExamples"

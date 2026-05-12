@@ -1,0 +1,9 @@
+import FwPython.Static.Semantics.Core
+import FwPython.Static.Semantics.Heap
+import FwPython.Static.Semantics.MultiStep
+import FwPython.Static.Semantics.Determinism
+import FwPython.Static.Semantics.HeapPreservation
+import FwPython.Static.Semantics.StateTyping
+import FwPython.Static.Semantics.Progress
+import FwPython.Static.Semantics.Preservation
+import FwPython.Static.Semantics.Soundness

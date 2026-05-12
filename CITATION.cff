@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it using the metadata from this file."
+title: "FwPython"
+abstract: >-
+  A Lean 4 formalization of a small object-oriented language and its gradual
+  extension.
+type: software
+authors:
+  - family-names: Chen
+    given-names: Jia
+repository-code: "https://github.com/grievejia/FwPython"
+url: "https://github.com/grievejia/FwPython"
+license: MIT
+version: 0.1.0
+keywords:
+  - Lean 4
+  - formalization
+  - programming languages
+  - type systems
+  - gradual typing
