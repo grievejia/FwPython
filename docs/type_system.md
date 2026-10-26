@@ -1,323 +1,326 @@
-# FwPython Type System
+# Static type system
 
-## Overview
+This document explains the design of static typing in FwPython. It connects the
+meaning of types to subtyping, expression checking, and the type safety proof.
+The [syntax reference](syntax.md) describes the language forms.
 
-FwPython uses a declarative static type system. The runtime has one value shape,
-object references, so nominal class views, callable views, and branch-sensitive
-negative facts all describe the same heap objects.
+## Start with a method call
 
-The static development is built around four ideas:
+Suppose Echo defines an identity method with a Bool argument and a Bool result:
 
-- nominal class membership is determined by MRO membership
-- `callable P R` is behavioral, not a nominal callable class
-- unions and intersections are primitive type constructors
-- negative information is class-only: `negClass C` means the runtime class has
-  a deterministic MRO that excludes `C`
+```text
+class Echo(Object):
+    echo(self, x: Bool) -> Bool = x
 
-`negClass C` is not a generic complement operator. It records a positive
-exclusion witness about one class name.
-
-## Core Judgments
-
-The main judgments are:
-
-- `HasType ct Γ e T`
-  expression typing
-- `ValueHasType ct h v T`
-  runtime value typing
-- `FindMethodType ct cname methodName paramTy returnTy`
-  method-signature lookup through the receiver MRO
-- `IsSubtype ct T U`
-  declarative subtyping
-
-The metatheory assumes:
-
-- `WellFormedClassTable ct`
-- `HeapWellFormed ct h`
-
-These are semantic invariants, not checker artifacts. They provide the MRO and
-heap facts used by the typing and soundness proofs.
-
-## Type Language
-
-FwPython uses a single static type language `Ty` for method annotations,
-expression typing, subtyping, and denotational semantics. `HasType` is the
-only public static typing judgment. Internal proof modules may package
-additional lookup or dispatch choices for algorithmic completeness or the
-static-to-gradual bridge, but those witnesses are not part of the public
-static interface and do not introduce a second annotation language.
-
-| Form | Meaning |
-| --- | --- |
-| `class_ C` | runtime class lies under `C` in the MRO |
-| `negClass C` | runtime-class MRO excludes `C` |
-| `callable P R` | invokable value accepting at least `P` and returning at most `R` |
-| `T \| U` | union |
-| `T & U` | intersection |
-| `bottom` | empty type |
-
-The universal supertype is `class_ Object`.
-
-### Why There Is Only One Static Type Language
-
-FwPython keeps a single `Ty` because the same facts need to be visible in four
-places at once: source-level annotations, internal typing derivations, semantic
-subtyping, and the static-to-gradual bridge. A separate surface annotation
-language would force every proof that crosses one of those boundaries to carry
-an embedding lemma before it could even state the relevant property. Using one
-language keeps the public meaning of an annotation identical to the internal
-meaning used by runtime typing and denotational semantics.
-
-## Subtyping
-
-`IsSubtype` is organized into five groups.
-
-### Preorder
-
-- reflexivity
-- transitivity
-
-### Bounded Distributive Lattice
-
-- `bottom <: T`
-- `T <: class_ Object`
-- intersection projection and introduction
-- union elimination and injection
-- forward distributivity of intersection over union
-
-### Nominal Classes
-
-- `class_ C <: class_ A` when `A` is in the computed MRO of `C`
-
-### Callables
-
-- `callable P R <: callable P' R'` when `P' <: P` and `R <: R'`
-- `callable P R <: class_ BoundMethod`
-- `(P → R) & (Q → S) <: (P | Q) → (R & S)`
-
-### Class-Only Negative Facts
-
-Negative reasoning is primitive and class-only.
-
-Primitive rules:
-
-- `sealedClassNegClass`
-  if `B` is a designated sealed built-in, `findClass B = b`, `ComputeMro b M`,
-  and `D ∉ M`, then `class_ B <: negClass D`
-- `objectClassUnionNegClass`
-  `class Object <: class C | negClass C`
-- `classSelfNegClassBottom`
-  `class_ C & negClass C <: bottom`
-
-The `LeafBuiltin` premise is restricted to `Bool`, `NoneType`, and
-`BoundMethod`. This is the open-world boundary: arbitrary user-defined classes
-do not get global non-overlap facts just because the current class table
-happens not to show an overlap. Only the designated leaf built-ins admit
-primitive global exclusion facts.
-
-The helper API in `FwPython/Static/Subtyping/Negation.lean` packages the
-usable consequences of this basis:
-
-- `callableBoundMethod` — the callable-to-`class_ BoundMethod` bridge
-- `leafBuiltinNegClass` — class-only exclusion for sealed built-ins
-- `classNegClassBottom` — contradiction from positive class subtyping
-- `negClassAntitone` — antitonicity of `negClass`
-- `negClass_class_contradiction`, `class_self_negClass_contradiction`,
-  `callable_negClass_boundMethod_contradiction`, `leaf_class_callable_bottom`
-
-There is no generic negation constructor, no generic negation-introduction
-rule, no pseudocomplement law, and no generic De Morgan library.
-
-### Why Negation Stops Here
-
-The negative fragment is intentionally narrower than generic semantic
-complement. The runtime can witness that a concrete object's MRO excludes a
-particular class name, and the subtyping rules can lift a small number of such
-facts in an open-world-safe way. What the system cannot justify is arbitrary
-set-theoretic complement, blanket non-overlap facts for user-defined classes,
-or a proof-relevant distinction between "non-callable" and "not this
-particular class". Restricting negation to `negClass C` keeps branch
-narrowing, runtime typing, and semantic subtyping aligned around the same piece
-of evidence.
-
-Callable reasoning is routed through `BoundMethod` for the same reason. The
-runtime callable carrier is a bound-method object in the heap, so the static
-system treats `class_ BoundMethod` as the nominal bridge for callable values.
-That yields exactly the negative consequences the proofs need, such as the
-contradiction between callability and `negClass BoundMethod`, without
-introducing a separate coarse callable / non-callable summary vocabulary.
-
-The routing through `BoundMethod` is also a deliberate modeling choice about
-what FwPython captures from Python. Real Python has many callable kinds —
-plain functions, lambdas, bound methods, classmethods, staticmethods,
-built-in functions, instances with `__call__`, and class types themselves —
-and a faithful static type system would need a richer callable vocabulary to
-distinguish them. FwPython collapses all of these into a single runtime
-carrier and treats `class_ BoundMethod` as both the nominal bridge for
-callability and the only callable shape in the heap. That collapse is what
-lets the static type language stop at one form of callable type
-(`callable P R`) and one nominal class for callable membership, and what
-lets the negation fragment dispatch "callable vs. not callable" through
-`negClass BoundMethod` instead of through a parallel callable-summary
-vocabulary. The cost is that FwPython cannot capture patterns that depend
-on Python's plurality of callable kinds, such as `__call__` on user-defined
-classes or first-class functions distinct from methods.
-
-## Static Typing
-
-The core typing judgment is `HasType ct Γ e T`.
-
-Relevant rules:
-
-- object creation yields `class_ C`
-- attribute access has two primitive forms: a class receiver `class_ C` yields
-  the looked-up `callable P R`, and a binary union of class receivers
-  `class_ C1 | class_ C2` yields the union of the two looked-up callables
-- calls require the callee at type `callable P R` and the argument at a subtype
-  of `P`, yielding `R`
-- ordinary conditionals require a boolean condition and return the union of the
-  branch result types
-- intersection introduction is general at the term level
-
-FwPython also has a specialized narrowing rule for `if isInstance(x, C)`. Like
-an ordinary conditional, it returns the union of the two branch result types,
-but it refines the tested variable asymmetrically on the way to those results.
-
-- then branch: `Γ[x ↦ T & class_ C]`
-- else branch: `Γ[x ↦ T & negClass C]`
-
-A failed `isInstance` test records one nominal exclusion fact.
-
-### Algorithmic Typing Checker
-
-The executable checker is phrased directly for `HasType ct Γ e T`. The
-synthesis procedure `inferBasis` computes a finite basis of candidate result
-types for an expression, and `checkHasType?` accepts exactly when some
-inferred basis member is a declarative subtype of the requested target.
-
-Attribute checking is finite because receiver views are enumerated from the
-current class table. Call checking uses a more general summary layer:
-`callableSummaryBasis` does not try to enumerate only source-level callable
-origins, but computes finite callable summaries that also cover collapsed
-callable facts obtained through subtyping, including union summaries,
-intersection-to-callable collapse, and the `.bottom` branch.
-
-The public checker is `checkHasType?`, with the equivalence theorem
-`checkHasType?_iff_hasType` under the usual well-formedness premises on the
-class table and environment. In other words, the executable layer is an
-algorithmic presentation of the same static typing judgment, and ordinary
-static typing inherits decidability directly from that checker.
-
-## Runtime Typing
-
-`ValueHasType` types runtime object references in four ways:
-
-- `objRef`
-  class typing from the concrete heap object and class subtyping
-- `objRefCallable`
-  callable typing from bound-method payload
-- `objRefNegClass`
-  class-only negative typing from:
-  - heap lookup of the object
-  - existence of the target class and its MRO
-  - existence of the object runtime class and its MRO
-  - a proof that the target class name is not in that runtime MRO
-- `sub` and `interIntro`
-  subsumption and runtime intersection introduction
-
-The key runtime negative fact is therefore witness-carrying from the start. It
-does not route through a generic complement semantics.
-
-## Semantic Foundation
-
-Subtyping soundness is proved over a single semantic carrier `SemObject ct`
-that distinguishes the three runtime shapes the proofs actually need:
-
-- `ordinaryCurrent` — an existing well-formed class instance
-- `ordinaryFresh` — a hypothetical instance of a fresh non-leaf class compatible
-  with a list of MRO seeds (the open-world witness)
-- `boundMethod` — a bound-method object with stored parameter and return types
-
-Denotation `Ty.semDenotes ct T obj` is direct and pointwise in a single class
-table. The clauses are:
-
-- `class_ C` — `obj.hasAncestor C`
-- `negClass C` — `¬ obj.hasAncestor C`
-- `callable P R` — `obj` is a `boundMethod` whose stored signature is wider in
-  the parameter and narrower in the return; the callable case stays
-  intensional because a fully extensional clause would not pass the
-  termination checker
-- `union`, `intersection`, `bottom` — the obvious propositional connectives
-
-Semantic subtyping is then plain denotation preservation:
-
-```lean
-SemSubtype ct T U := ∀ obj, Ty.semDenotes ct T obj → Ty.semDenotes ct U obj
+(new Echo).echo(TRUE)
 ```
 
-Open-world reasoning is recovered without an `Extends` quantifier: the
-`ordinaryFresh` carrier supplies the hypothetical-class witnesses needed for
-e.g. `negClass`-style reasoning, and `WellFormedTy` is a pointwise
-current-table notion throughout.
+This is readable notation for a class declaration and a main expression.
+The method body is the expression `x`.
 
-### Why The Semantics Uses `ordinaryFresh`
+The call first creates an Echo object. Attribute access finds `echo` and
+produces a *bound method*: a method definition paired with its receiver object.
+Calling this value binds its argument to TRUE, evaluates the body, and returns TRUE.
 
-Completeness needs open-world counterexamples: to refute an invalid subtype, it
-must sometimes imagine a fresh non-leaf class that extends the current table in
-a way compatible with the visible MRO seeds. FwPython packages those witnesses
-inside `SemObject` rather than quantifying over separate extended class tables.
-This keeps `SemSubtype` pointwise in one class table, keeps `WellFormedTy`
-local to that table, and lets the decision procedure work constructively over a
-single semantic carrier instead of alternating between syntax and an external
-extension relation.
+This example needs two kinds of type information. The receiver has class Echo,
+which determines method lookup. The bound method has function type
+`Bool -> Bool`, which determines the permitted argument and result.
+Both values are object references. The *heap* stores the objects to which they refer.
 
-## Proof Architecture
+## Types and their meaning
 
-The proof stack is:
+A type states requirements on a value. A single value can satisfy several types.
+For example, TRUE has class types Bool and Object.
 
-1. prove `IsSubtype` sound with respect to `SemSubtype` (`semSubtype_sound`)
-2. prove the open-world completeness direction
-   `SemSubtype ct T U → IsSubtype ct T U` for well-formed inputs
-   (`semSubtype_complete`), giving the headline equivalence
-   `isSubtype_iff_semSubtype`
-3. derive the inversion lemmas needed by the runtime proofs
-4. prove preservation for the continuation machine
-5. combine preservation with progress to obtain soundness
+A *method resolution order* (MRO) lists a class and its ancestors in method
+lookup order. A value has class type C when its runtime class's MRO contains C.
+This includes objects of C's subclasses.
 
-For executable use, the equivalence carries through to a constructive
-decision procedure: under `WellFormedClassTable ct` and `WellFormedTy`
-hypotheses on the two sides,
+Bool and NoneType are the classes of the Boolean and None constants.
+BoundMethod is the class of method values.
 
-- `isSubtype_decidable hwfct hwfT hwfU : Decidable (IsSubtype ct T U)`
-- `semSubtype_decidable hwfct hwfT hwfU : Decidable (SemSubtype ct T U)`
+The static type language is `Ty`. The following notation applies to method
+annotations, expression types, and types assigned to heap values.
 
-are produced by a single `WellFounded.fix` over a `DecisionGoal` sum that
-unifies the subtype recursion with the bound-method denotation recursion.
-Yes-answers return syntactic `IsSubtype` proofs; no-answers return a
-`SemObject` counterexample together with denotation/non-denotation evidence.
-No classical reasoning is used.
+| Type | Meaning |
+| --- | --- |
+| `class_ C`, written C below | The object's runtime MRO contains C. |
+| `negClass C` | The object's runtime MRO excludes C. |
+| `callable P R`, written `P -> R` | Calls on P inputs must not fail. Any returned result must have type R. |
+| `T \| U` | The value has type T, type U, or both. |
+| `T & U` | The value has both types. |
+| `bottom` | No values. |
 
-This proof order is deliberate. The runtime proofs need inversion lemmas about
-what a typed object reference can or cannot be, and those inversion lemmas are
-cleanest when they are recovered from a prior semantic account of subtyping
-rather than baked into the syntax-directed typing rules themselves. Keeping
-`IsSubtype` declarative also prevents the theorem surface from depending on an
-algorithm's search order or normalization strategy.
+Object contains every value. Only bound methods can be called, so every
+function type requires class BoundMethod.
 
-The main `isInstance` preservation case is direct:
+Function types do not require termination. A method with type `P -> bottom`
+can run forever on P inputs. An empty input has a different meaning:
+`bottom -> R` places no requirement on results because no argument can reach
+the call. Every bound method satisfies that empty-input requirement.
 
-- the then branch narrows with `class_ C`
-- the else branch narrows with `negClass C`
-- the runtime witness is constructed with `ValueHasType.objRefNegClass`
+Class exclusion supports the negative branch of a class test. The language
+does not provide general negation of function types, unions, or intersections.
 
-## Design Boundary
+## Why subtyping comes from equations
 
-The static language deliberately stops at a small negative fragment.
+Subtyping answers whether a value of one type can be used where another type
+is required. We write `T <: U` for this relation.
 
-- negative facts are only `negClass C`
-- callable negative reasoning is mediated through `BoundMethod`
-- leaf-built-in sealing is the only source of open-world-safe primitive class
-  exclusion
-- there is no coarse callable-summary / non-callable-summary vocabulary
+Every Bool is an Object. Thus, adding Bool to the alternatives in
+`Bool | Object` does not change Object:
 
-That boundary matches the runtime evidence the proofs can actually justify.
+```text
+Bool | Object ≈ Object
+```
+
+Here, `≈` means equality derived from the type laws. The general definition is:
+
+```text
+T <: U  means  T | U ≈ U
+```
+
+This definition gives one common foundation for subtyping rules. A rule is
+proved by deriving its union equation from the laws for types.
+
+Union combines alternatives; intersection combines requirements. Their laws
+permit changes of order and grouping, removal of repeated types, and distribution:
+
+```text
+T | bottom ≈ T
+T & Object ≈ T
+T & (U | V) ≈ (T & U) | (T & V)
+```
+
+These laws also give an equivalent subtype test, `T & U ≈ T`.
+They imply that bottom is below every type, every type is below Object,
+and each part of a union is below the union.
+
+### Function inputs and results
+
+A function can replace another function when it accepts all required inputs
+and returns only permitted results. Therefore, input and result subtyping have
+different directions:
+
+```text
+P' <: P and R <: R'
+imply
+(P -> R) <: (P' -> R')
+```
+
+For example, an Object-input function accepts Bool inputs. A Bool-result
+function also meets an Object-result requirement.
+
+The function equations explain these rules:
+
+```text
+(P | Q) -> R ≈ (P -> R) & (Q -> R)
+P -> (R & S) ≈ (P -> R) & (P -> S)
+```
+
+The first equation splits the accepted inputs into alternatives. The second
+combines simultaneous result requirements. Substituting `Object | Bool ≈ Object`
+in the first equation derives `Object -> R <: Bool -> R`.
+The second equation gives the corresponding result rule.
+
+Intersections can also combine different inputs and results:
+
+```text
+(Bool -> Bool) & (NoneType -> NoneType)
+    <: (Bool | NoneType) -> (Bool | NoneType)
+```
+
+The same function meets both requirements. A Bool argument requires a Bool
+result, and a NoneType argument requires a NoneType result.
+If an argument meets two input requirements, the returned value must meet both
+result requirements.
+
+## Validate the hierarchy before checking methods
+
+Subtyping needs to know which classes exist and how they inherit.
+Method typing then uses subtyping to check arguments, results, and overrides.
+Full program validation must follow that order:
+
+```text
+WellFormedClassHierarchy → subtyping → method typing → WellTypedClassHierarchy
+```
+
+The *class table* is the list of declarations. The two hierarchy records
+contain data and validation evidence about that list.
+
+`WellFormedClassHierarchy ct` supplies the classes selected by lookup, their
+computed MROs, and the builtin class restrictions. Object is the root.
+Bool, NoneType, and BoundMethod are *sealed*: a different class cannot inherit
+from them.
+
+These facts define the class context used by the type equations.
+Every class name in a type must occur in that context.
+The Lean proofs package an annotation with proof that its names are declared.
+Derived types can reuse this evidence. Subtyping therefore applies to valid annotations;
+an unknown class name does not denote bottom.
+
+`WellTypedClassHierarchy ct` extends the hierarchy record with method typing
+and declaration checks. In particular:
+
+- Each method body has its declared result type under its receiver and argument types.
+- The method selected by a class accepts each ancestor method's inputs and returns results below that ancestor's result type.
+- Method names and direct parents do not repeat within a selected declaration.
+- Method signatures use known class names, and declarations sharing a class name agree.
+
+The override requirement applies to inherited methods as well as explicit
+overrides. A call checked against an ancestor's signature can run on a subclass,
+so the subclass's selected method must meet that signature.
+
+## Account for future subclasses
+
+A class annotation includes possible subclass objects. Suppose A and B each
+inherit Object. A future class C could inherit both:
+
+```text
+class C(A, B): ...
+```
+
+An object of C would have both types A and B. Thus, `A & B` can remain possible
+even when the current class table has no common subclass.
+The absence of a declared common subclass is insufficient to derive
+`A <: negClass B`.
+
+Inheritance order can rule out such a subclass:
+
+```text
+class A(X, Y): ...
+class B(Y, X): ...
+```
+
+A subclass of A must preserve X before Y. A subclass of B must preserve Y before X.
+No single MRO can preserve both orders, so `A & B` is bottom in this case.
+The C3 check also detects conflicts that involve more than two classes.
+
+### Describe a possible subclass with known names
+
+Types cannot refer to a class name that the program has not declared.
+They can still describe whether an object's MRO includes each known class.
+
+A *complete class conjunction* makes that choice for every known name.
+For example, with names Object, A, and B, one choice is
+`Object & A & negClass B`. The actual context also includes the sealed builtins.
+
+A valid choice must include Object and every ancestor of an included class.
+It must obey sealing and have an MRO order compatible with all included classes.
+These conditions determine which choices the subtype checker retains.
+
+The hierarchy proofs establish both directions of this characterization.
+Every class in a valid extension gives such a choice.
+Every valid choice has an extension that realizes it, possibly by adding a
+fresh class with no methods. Each choice can use a separate extension.
+
+This result concerns inheritance. It does not establish full method typing for
+every constructed extension. For example, suppose A supplies `m: Bool -> Bool`
+and B supplies `m: NoneType -> NoneType`. A subclass C(A, B) can have a valid MRO
+but select A.m, which fails B.m's input requirement.
+The program needs a compatible method and a typing proof for its body.
+
+The development also does not prove general transport of every subtype proof
+to an extended class table. Its extension results justify the class possibilities
+and impossibilities used by the type equations.
+
+## Check expressions with these subtype rules
+
+Expression typing uses the hierarchy and an environment that assigns types to
+variables. Attribute access obtains a method's function type. A call checks
+that the argument type is below the function's input type, then uses its result type.
+
+A conditional requires a Boolean condition and combines the possible branch
+results with a union. A class test also refines the tested variable:
+
+| Branch of `if isInstance(x, C)` | Type of x |
+| --- | --- |
+| Positive | `T & C` |
+| Negative | `T & negClass C` |
+
+T is x's type before the test. Each branch keeps that information and adds
+the fact established by the test.
+
+An expression can have more than one type. If it has T and U, it can also have
+`T & U`. For example, different function requirements can describe the same
+bound method. The executable checker must account for these combined typings.
+
+### Decide subtyping
+
+The subtype checker rewrites a type as a union of intersections.
+Each intersection contains a complete class conjunction and any function
+requirements that apply to that class choice. The type laws justify this rewrite.
+
+The checker requires every source alternative to fit a target alternative.
+Class choices must agree. Function comparison combines all applicable source
+requirements, as in the Bool and NoneType example above.
+
+For a requested result R, the checker considers nonempty groups of function
+requirements whose combined results are below R. Each group applies where all
+its inputs hold. The union of those input types must cover the target input.
+This permits several requirements to justify one function subtype.
+
+Recursive comparisons inspect function inputs and results with less function
+nesting. The proof connects the complete calculation to the equations in both
+directions: an accepted comparison gives a subtype derivation, and every subtype
+derivation is accepted. A rejected comparison therefore proves that no such
+derivation exists.
+
+### Decide expression typing
+
+The expression checker constructs a finite collection of possible result types,
+including intersections needed to cover combined typings.
+It accepts a requested type when a candidate is below that type.
+
+Completeness means that every declarative result type has a candidate below it.
+Together with candidate soundness and the subtype checker, this proves agreement
+between executable checking and the typing rules.
+
+These exhaustive calculations support constructive proofs. Large class lists
+or repeated calls on returned function types can exceed Lean's evaluation limits.
+The examples check concrete queries within those limits.
+
+## Connect typing to execution
+
+The safety proof must connect the method signature found during checking to
+the method body that executes. Heap validity supplies that connection:
+a bound method stores a real receiver and a method from that receiver's MRO.
+Method typing and the override requirement then justify execution of that body.
+
+Heap validity also connects builtin class names to object storage.
+Bool objects are the two Boolean singletons, and a BoundMethod object contains
+exactly the receiver and method data needed for a call.
+Each execution step preserves these requirements.
+
+One call case needs special care. If `P -> R <: Q -> S`, the equations imply
+`Q <: P`. They imply `R <: S` only when Q is not below bottom.
+An empty input places no result requirement on a function.
+
+While the argument is being evaluated, it can have type bottom and run forever.
+If it returns, the proof has an actual typed value.
+No typed heap value can have type bottom, so the input is nonempty and the result
+comparison applies. Method body typing can then establish the required result.
+
+The proof uses each actual object's MRO for class membership and exclusion.
+`objectTypeLowerBound` constructs a type below every type assigned to that
+object reference. This supports the union and exclusion cases; method execution
+also needs the proof that the body is typed, as described above.
+
+Preservation proves that a step keeps the heap and machine types valid.
+Progress proves that a valid unfinished state can take a step.
+Together, these results give static type safety: from a well-typed hierarchy,
+a valid heap, and correctly typed variable values, a typed expression cannot fail.
+If it finishes, its result has the expression's type. It can also run forever.
+
+## Key definitions and results
+
+| Lean name | Role |
+| --- | --- |
+| `HasType` | Declarative expression typing under a validated hierarchy and variable types. |
+| `ValueHasType` | Typing of object references in a heap. |
+| `checkSubtypeBool_iff_subtype` | The Boolean subtype checker agrees with subtyping defined by equations. |
+| `checkHasType?_iff_hasType` | The expression checker agrees with declarative typing for valid inputs. |
+| `SmallStep.program_soundness` | Static safety from the initial heap and an empty variable environment. |
+
+The public imports are `FwPython.Static.Language` for language definitions and
+`FwPython.Static` for the complete static development.

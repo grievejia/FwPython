@@ -83,31 +83,21 @@ private theorem step_preserves_boolExhaustive
       (show boundMethodClass ≠ boolClass by decide) honly
   | _ => exact honly
 
-private theorem step_preserves_payloadBoundMethod
-    (hstep : Step ct cct s s') (hbounded : s.heap.IdsBounded)
-    (hpbm : ∀ oid cname recvOid m,
-      s.heap.lookup oid = some ⟨cname, .boundMethod recvOid m⟩ →
-      cname = boundMethodClass) :
-    ∀ oid cname recvOid m,
-      s'.heap.lookup oid = some ⟨cname, .boundMethod recvOid m⟩ →
-      cname = boundMethodClass := by
+/-- Allocation preserves the equivalence between BoundMethod class and invokable payload. -/
+private theorem step_preserves_boundMethodShape
+    (hstep : Step ct cct s s')
+    (shape : ∀ oid obj, s.heap.lookup oid = some obj →
+      (obj.className = boundMethodClass ↔ ∃ receiver method, obj.payload = .boundMethod receiver method)) :
+    ∀ oid obj, s'.heap.lookup oid = some obj →
+      (obj.className = boundMethodClass ↔ ∃ receiver method, obj.payload = .boundMethod receiver method) := by
   cases hstep with
-  | newSuccess _ _ _ _ halloc =>
-    intro oid cname recvOid m hlook; obtain ⟨rfl, rfl⟩ := Prod.mk.inj halloc
-    unfold CheckedHeap.lookup at hlook
-    simp only [RuntimeHeap.lookup, RuntimeHeap.lookupList] at hlook
-    split at hlook
-    · exact absurd (Option.some.inj hlook) (by simp [CheckedHeapObject.mk.injEq])
-    · exact hpbm oid cname recvOid m hlook
+  | newSuccess _ _ _ notMethod halloc =>
+    exact RuntimeHeap.alloc_preserves_property halloc (by simp [notMethod]) shape
   | returnAttrAccess _ _ _ _ halloc
   | returnDynAttrAccess _ _ _ _ halloc =>
-    intro oid cname recvOid m hlook; obtain ⟨rfl, rfl⟩ := Prod.mk.inj halloc
-    unfold CheckedHeap.lookup at hlook
-    simp only [RuntimeHeap.lookup, RuntimeHeap.lookupList] at hlook
-    split at hlook
-    · exact (congrArg CheckedHeapObject.className (Option.some.inj hlook)).symm
-    · exact hpbm oid cname recvOid m hlook
-  | _ => exact hpbm
+    exact RuntimeHeap.alloc_preserves_property halloc
+      ⟨fun _ => ⟨_, _, rfl⟩, fun _ => rfl⟩ shape
+  | _ => exact shape
 
 private theorem step_preserves_payloadReceiverValid
     (hstep : Step ct cct s s') (hbounded : s.heap.IdsBounded)
@@ -156,8 +146,7 @@ theorem step_preserves_checkedHeapWellFormed
   initialTrue := step_preserves_heapMonotonicity hstep hwf.idsBounded hwf.initialTrue
   initialFalse := step_preserves_heapMonotonicity hstep hwf.idsBounded hwf.initialFalse
   boolExhaustive := step_preserves_boolExhaustive hstep hwf.boolExhaustive
-  payloadBoundMethod := step_preserves_payloadBoundMethod hstep hwf.idsBounded
-    hwf.payloadBoundMethod
+  boundMethodShape := step_preserves_boundMethodShape hstep hwf.boundMethodShape
   payloadReceiverValid := step_preserves_payloadReceiverValid hstep hwf.idsBounded
     hwf.payloadReceiverValid
 
@@ -231,7 +220,11 @@ theorem checkedHeapInitial_wellFormed
         · rename_i hfalse
           exact .inr hfalse.symm
         · cases hlook
-  payloadBoundMethod := fun _ _ _ _ hlook => initialHeap_lookup_cases hlook nofun nofun
+  boundMethodShape := by
+    intro oid obj lookup
+    exact initialHeap_lookup_cases lookup
+      (fun equal => by cases equal; simp [noneClass, boundMethodClass])
+      (fun equal => by cases equal; simp [boolClass, boundMethodClass])
   payloadReceiverValid := fun _ _ _ _ hlook => initialHeap_lookup_cases hlook nofun nofun
 
 /-! ## Execution-level corollary -/

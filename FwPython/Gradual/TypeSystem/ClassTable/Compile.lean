@@ -6,306 +6,277 @@ import FwPython.Common.Forall2
 
 Defines explicit front-end compilation correspondence between a gradual
 class table and a checked class table. Checked method signatures record
-the machine-facing projection `runtimePublicTy` of gradual annotations,
-and checked method bodies are required to be exactly `compileCheck` of a
-source typing witness under the runtime's first-match method-body
-environment order `[param, receiver]`. -/
+the machine-facing checked-target image of gradual annotations,
+and checked method bodies are compiled at neutral target `any` under the
+runtime's first-match method-body environment order `[param, receiver]`.
+The runtime method-return frame enforces the declared return boundary. -/
 
 namespace Checked
 
 /-! ## Structural correspondence -/
 
+/-- Data-bearing compilation artifact for one source method at a concrete source
+class name. -/
 structure IsCompiledMethodAt
-    (gct : GClassTable) (cname : Identifier)
-    (gm : GMethod) (cm : CheckedMethod) : Prop where
+    (gct : GClassTable) (hwfct : WellFormedGClassTableCore gct)
+    (cname : Identifier)
+    (gm : GMethod) (cm : CheckedMethod) : Type where
+  /-- Preserve the method name from source to checked method. -/
   name_eq : cm.name = gm.name
+  /-- Preserve the receiver parameter name. -/
   receiverParam_eq : cm.receiverParam = gm.receiverParam
+  /-- Preserve the explicit argument parameter name. -/
   param_eq : cm.param = gm.param
-  paramTy_eq : cm.paramTy = gm.paramTy
-  returnTy_eq : cm.returnTy = gm.returnTy
-  paramContract_eq : cm.parameterContract = compileBoundaryRaw cm.paramTy
-  returnContract_eq : cm.returnContract = compileBoundaryRaw cm.returnTy
-  parameterLabels_eq :
-    cast (by simpa [paramTy_eq] using congrArg BoundaryLabels paramContract_eq) cm.parameterLabels =
-      (mkBoundaryLabels (.methodParameter cname gm.name) .negative
-        (compileBoundaryRaw gm.paramTy) 0).1
-  returnLabels_eq :
-    cast (by simpa [returnTy_eq] using congrArg BoundaryLabels returnContract_eq) cm.returnLabels =
-      (mkBoundaryLabels (.methodReturn cname gm.name) .positive
-        (compileBoundaryRaw gm.returnTy) 0).1
-  body_compiled :
-    ∃ hwfct : WellFormedGClassTableCore gct,
-      ∃ srcTy,
-      ∃ hsrc : GSrcInfer gct hwfct
-        [{ name := gm.param, sourceTy := gm.paramTy },
-         { name := gm.receiverParam, sourceTy := .class_ cname }]
-        gm.body
-        srcTy,
-      cm.body =
-        (compileCheck (.methodBody cname gm.name) hsrc
-          [(gm.param, gm.paramTy),
-           (gm.receiverParam, .class_ cname)]
-          gm.returnTy
-          0).1
+  /-- The checked method parameter target is `checkedTargetOfGTy gm.paramTy`. -/
+  paramTy_eq : cm.paramTy = checkedTargetOfGTy gm.paramTy
+  /-- The checked method return target is `checkedTargetOfGTy gm.returnTy`. -/
+  returnTy_eq : cm.returnTy = checkedTargetOfGTy gm.returnTy
+  /-- The stored parameter obligation is the source method-parameter type obligation. -/
+  parameterObligation_eq :
+    cm.parameterObligation =
+      .hasType (.methodParameter cname gm.name) gm.paramTy
+  /-- The stored return obligation is the source method-return type obligation. -/
+  returnObligation_eq :
+    cm.returnObligation =
+      .hasType (.methodReturn cname gm.name) gm.returnTy
+  /-- The source type synthesized for the method body. -/
+  body_srcTy : GTy
+  /-- The source typing witness for compiling the checked method body. -/
+  body_hsrc : GSrcInfer gct hwfct
+    [{ name := gm.param, sourceTy := gm.paramTy },
+     { name := gm.receiverParam, sourceTy := .class_ cname }]
+    gm.body
+    body_srcTy
+  /-- The stored checked body is compiled at neutral target `any`; the
+  method-return frame enforces `gm.returnTy` after the body produces a value. -/
+  body_eq :
+    cm.body =
+      (compileCheck body_hsrc
+        [(gm.param, gm.paramTy), (gm.receiverParam, .class_ cname)]
+        .any
+        (.methodBody cname gm.name []))
 
+/-- Interpreting the checked parameter and return targets reproduces the source
+method's parameter and return types — a direct consequence of `paramTy_eq` and
+`returnTy_eq`. -/
+theorem IsCompiledMethodAt.interpTargets
+    (hmc : IsCompiledMethodAt gct hwfct cname gm cm) :
+    interpTarget cm.paramTy = gm.paramTy ∧
+    interpTarget cm.returnTy = gm.returnTy :=
+  ⟨hmc.paramTy_eq ▸ interpTarget_checkedTargetOfGTy _,
+   hmc.returnTy_eq ▸ interpTarget_checkedTargetOfGTy _⟩
+
+/-- Data-bearing compilation artifact for one source class and checked class. -/
 structure IsCompiledClass
-    (gct : GClassTable) (gc : GClass) (cc : CheckedClass) : Prop where
+    (gct : GClassTable) (hwfct : WellFormedGClassTableCore gct)
+    (gc : GClass) (cc : CheckedClass) : Type where
+  /-- Preserve the class name from source to checked class. -/
   name_eq : cc.name = gc.name
+  /-- Preserve the declared base-class list. -/
   baseClasses_eq : cc.baseClasses = gc.baseClasses
-  methods_compiled : Forall₂ (IsCompiledMethodAt gct gc.name) gc.methods cc.methods
+  /-- Data-bearing pointwise correspondence between source methods and checked methods. -/
+  methods_compiled :
+    Forall2Data (IsCompiledMethodAt gct hwfct gc.name) gc.methods cc.methods
 
-def IsCompiledClassTable (gct : GClassTable) (cct : CheckedClassTable) : Prop :=
-  Forall₂ (IsCompiledClass gct) gct cct
+/-- Data-bearing pointwise compilation artifact for a source and checked class table. -/
+def IsCompiledClassTable
+    (gct : GClassTable) (hwfct : WellFormedGClassTableCore gct)
+    (cct : CheckedClassTable) : Type :=
+  Forall2Data (IsCompiledClass gct hwfct) gct cct
 
+/-- Checked elaboration artifact for a whole gradual program at a requested target. -/
 structure ElaboratesProgramAt
     (gp : GProgram) (P : GTy) (cp : CheckedProgram) where
-  classes_elab : IsCompiledClassTable gp.classes cp.classes
+  /-- The well-formedness witness used by class-table and main-expression compilation. -/
   hwfct : WellFormedGClassTableCore gp.classes
+  /-- Data-bearing compilation artifact for the program class table under `hwfct`. -/
+  classes_elab : IsCompiledClassTable gp.classes hwfct cp.classes
+  /-- The source type synthesized for the program main expression. -/
   main_srcTy : GTy
+  /-- The source typing witness for compiling the main expression. -/
   main_hsrc : GSrcInfer gp.classes hwfct [] gp.main main_srcTy
-  main_eq : cp.main = (compileCheck .main main_hsrc [] P 0).1
-  target_runtimePublic : RuntimePublicAnnotation gp.classes P
+  /-- The checked program main is the compiler-produced checked expression for
+  `main_hsrc`. -/
+  main_eq : cp.main = compileCheck main_hsrc [] P (.main [])
+  /-- The requested program target is representable as a checked runtime target. -/
+  target_checkedTarget : CheckedTargetTy gp.classes P
+  /-- The requested program target is well formed for the gradual class table. -/
   target_wf : WellFormedGTy gp.classes P
-
-theorem ElaboratesProgramAt.main_elabCheck
-    (hcompiled : ElaboratesProgramAt gp P cp) :
-    ElabCheck .main hcompiled.main_hsrc [] P 0 cp.main
-      (compileCheck .main hcompiled.main_hsrc [] P 0).2 :=
-  hcompiled.main_eq ▸ compileCheck_elaborates
 
 /-! ## Lookup correspondence -/
 
-theorem isCompiledClassTable_findClass
-    (hct : Forall₂ (IsCompiledClass gct) gclasses cclasses)
-    (hfind : findGClass gclasses cname = some gc) :
-    ∃ cc, findCheckedClass cclasses cname = some cc ∧ IsCompiledClass gct gc cc := by
-  induction hct with
-  | nil =>
-      have : False := by
-        simp [findGClass, findClass, findByName] at hfind
-      exact False.elim this
-  | @cons gc' cc' gclasses cclasses hc _ ih =>
-      by_cases hname : gc'.name = cname
-      · have hhead : findGClass (gc' :: gclasses) cname = some gc' := by
-          simp [findGClass, findClass, findByName, hname]
-        rw [hhead] at hfind
-        cases hfind
-        have hcchead : findCheckedClass (cc' :: cclasses) cname = some cc' := by
-          have hccname : cc'.name = cname := hc.name_eq.trans hname
-          simp [findCheckedClass, findByName, hccname]
-        exact ⟨cc', hcchead, hc⟩
-      · have hccneq : cc'.name ≠ cname := by
-          intro hEq
-          exact hname (hc.name_eq.symm.trans hEq)
-        have htail : findGClass gclasses cname = some gc := by
-          simpa [findGClass, findClass, findByName, hname] using hfind
-        obtain ⟨cc, hfindc, hcc⟩ := ih htail
-        exact ⟨cc, by simpa [findCheckedClass, findByName, hccneq] using hfindc, hcc⟩
+/-- Transport a successful source class lookup to the compiled checked class,
+where `value` is the checked class, `found` is the checked lookup equality, and
+`related` is the class compilation artifact. -/
+def isCompiledClassTable_findClass
+    (hct : IsCompiledClassTable gct hwfct cct)
+    (hfind : findGClass gct cname = some gc) :
+    FindByNameForwardData
+      (IsCompiledClass gct hwfct)
+      CheckedClass.name
+      cct
+      cname
+      gc :=
+  findByName_some_of_forall2Data
+    (R := IsCompiledClass gct hwfct)
+    (getName₁ := ClassDecl.name)
+    (getName₂ := CheckedClass.name)
+    (fun h => h.name_eq.symm)
+    hct
+    hfind
 
-private theorem isCompiledClassTable_findClass_none
-    (hct : Forall₂ (IsCompiledClass gct) gclasses cclasses)
-    (hfind : findGClass gclasses cname = none) :
-    findCheckedClass cclasses cname = none := by
-  induction hct with
-  | nil =>
-      rfl
-  | @cons gc' cc' gclasses cclasses hc _ ih =>
-      by_cases hname : gc'.name = cname
-      · have hhead : findGClass (gc' :: gclasses) cname = some gc' := by
-          simp [findGClass, findClass, findByName, hname]
-        rw [hhead] at hfind
-        cases hfind
-      · have hccneq : cc'.name ≠ cname := by
-          intro hEq
-          exact hname (hc.name_eq.symm.trans hEq)
-        have htail : findGClass gclasses cname = none := by
-          simpa [findGClass, findClass, findByName, hname] using hfind
-        simpa [findCheckedClass, findByName, hccneq] using ih htail
+/-- Transport a failed source class lookup to the checked class table. -/
+theorem isCompiledClassTable_findClass_none
+    (hct : IsCompiledClassTable gct hwfct cct)
+    (hfind : findGClass gct cname = none) :
+    findCheckedClass cct cname = none :=
+  findByName_none_of_forall2Data
+    (R := IsCompiledClass gct hwfct)
+    (getName₁ := ClassDecl.name)
+    (getName₂ := CheckedClass.name)
+    (fun h => h.name_eq.symm)
+    hct
+    hfind
 
-private theorem isCompiledClassTable_findClass_reverse
-    (hct : Forall₂ (IsCompiledClass gct) gclasses cclasses)
-    (hfind : findCheckedClass cclasses cname = some cc) :
-    ∃ gc, findGClass gclasses cname = some gc ∧ IsCompiledClass gct gc cc := by
-  by_cases hnone : findGClass gclasses cname = none
-  · have : findCheckedClass cclasses cname = none :=
-      isCompiledClassTable_findClass_none hct hnone
-    rw [this] at hfind
-    cases hfind
-  · cases hfindg : findGClass gclasses cname with
-    | none =>
-        contradiction
-    | some gc =>
-        obtain ⟨cc', hfindc, hcc⟩ := isCompiledClassTable_findClass hct hfindg
-        rw [hfindc] at hfind
-        cases hfind
-        exact ⟨gc, rfl, hcc⟩
+/-- Transport a successful checked class lookup back to the source class, where
+`value` is the source class, `found` is the source lookup equality, and
+`related` is the class compilation artifact. -/
+def checkedClass_lookup_to_source
+    (hct : IsCompiledClassTable gct hwfct cct)
+    (hfc : findCheckedClass cct cname = some cc) :
+    FindByNameReverseData
+      (IsCompiledClass gct hwfct)
+      ClassDecl.name
+      gct
+      cname
+      cc :=
+  findByName_some_right_of_forall2Data
+    (R := IsCompiledClass gct hwfct)
+    (getName₁ := ClassDecl.name)
+    (getName₂ := CheckedClass.name)
+    (fun h => h.name_eq.symm)
+    hct
+    hfc
 
-private theorem isCompiledMethods_findMethod
-    (hms : Forall₂ (IsCompiledMethodAt gct cname) gms cms)
+/-- Transport a successful source method lookup to the compiled checked method,
+where `value` is the checked method, `found` is the checked lookup equality, and
+`related` is the method compilation artifact. -/
+def isCompiledMethods_findMethod
+    (hms : Forall2Data (IsCompiledMethodAt gct hwfct cname) gms cms)
     (hfind : findGMethodInList gms mname = some gm) :
-    ∃ cm, findCheckedMethodInList cms mname = some cm ∧
-      IsCompiledMethodAt gct cname gm cm := by
-  induction hms with
-  | nil =>
-      have : False := by
-        simp [findGMethodInList, findMethodInList, findByName] at hfind
-      exact False.elim this
-  | @cons gm' cm' gms cms hm _ ih =>
-      by_cases hname : gm'.name = mname
-      · have hhead : findGMethodInList (gm' :: gms) mname = some gm' := by
-          simp [findGMethodInList, findMethodInList, findByName, hname]
-        rw [hhead] at hfind
-        cases hfind
-        have hcmhead : findCheckedMethodInList (cm' :: cms) mname = some cm' := by
-          have hcmname : cm'.name = mname := hm.name_eq.trans hname
-          simp [findCheckedMethodInList, findByName, hcmname]
-        exact ⟨cm', hcmhead, hm⟩
-      · have hcmneq : cm'.name ≠ mname := by
-          intro hEq
-          exact hname (hm.name_eq.symm.trans hEq)
-        have htail : findGMethodInList gms mname = some gm := by
-          simpa [findGMethodInList, findMethodInList, findByName, hname] using hfind
-        obtain ⟨cm, hfindc, hmc⟩ := ih htail
-        exact ⟨cm, by simpa [findCheckedMethodInList, findByName, hcmneq] using hfindc, hmc⟩
+    FindByNameForwardData
+      (IsCompiledMethodAt gct hwfct cname)
+      CheckedMethod.name
+      cms
+      mname
+      gm :=
+  findByName_some_of_forall2Data
+    (R := IsCompiledMethodAt gct hwfct cname)
+    (getName₁ := MethodDecl.name)
+    (getName₂ := CheckedMethod.name)
+    (fun h => h.name_eq.symm)
+    hms
+    hfind
 
-private theorem isCompiledMethods_findMethod_none
-    (hms : Forall₂ (IsCompiledMethodAt gct cname) gms cms)
+/-- Transport a failed source method lookup to the checked method list. -/
+theorem isCompiledMethods_findMethod_none
+    (hms : Forall2Data (IsCompiledMethodAt gct hwfct cname) gms cms)
     (hfind : findGMethodInList gms mname = none) :
-    findCheckedMethodInList cms mname = none := by
-  induction hms with
-  | nil =>
-      rfl
-  | @cons gm' cm' gms cms hm _ ih =>
-      by_cases hname : gm'.name = mname
-      · have hhead : findGMethodInList (gm' :: gms) mname = some gm' := by
-          simp [findGMethodInList, findMethodInList, findByName, hname]
-        rw [hhead] at hfind
-        cases hfind
-      · have hcmneq : cm'.name ≠ mname := by
-          intro hEq
-          exact hname (hm.name_eq.symm.trans hEq)
-        have htail : findGMethodInList gms mname = none := by
-          simpa [findGMethodInList, findMethodInList, findByName, hname] using hfind
-        simpa [findCheckedMethodInList, findByName, hcmneq] using ih htail
+    findCheckedMethodInList cms mname = none :=
+  findByName_none_of_forall2Data
+    (R := IsCompiledMethodAt gct hwfct cname)
+    (getName₁ := MethodDecl.name)
+    (getName₂ := CheckedMethod.name)
+    (fun h => h.name_eq.symm)
+    hms
+    hfind
 
-theorem isCompiledClassTable_findMethodInMro
-    (hct : IsCompiledClassTable gct cct)
+/-- Transport a successful source MRO method lookup to the checked MRO while
+preserving the source class name that supplied the method artifact. The returned
+Common lookup data stores the checked method in `member2`, the checked MRO
+lookup equality in `found`, and the `IsCompiledMethodAt` artifact in
+`related`. -/
+def isCompiledClassTable_findMethodInMro
+    (hct : IsCompiledClassTable gct hwfct cct)
     (hfind : findGMethodInMro gct mro mname = some gm) :
-    ∃ cm, findCheckedMethodInMro cct mro mname = some cm ∧
-      ∃ dname, IsCompiledMethodAt gct dname gm cm :=
-  findMemberInHierarchy_transport
-    (RClass := fun gc cc => IsCompiledClass gct gc cc)
-    (RMember := fun gm cm => ∃ dname, IsCompiledMethodAt gct dname gm cm)
+    RelatedHierarchyLookupData
+      findCheckedClass
+      CheckedClass.methods
+      CheckedMethod.name
+      cct
+      mro
+      mname
+      (fun definingClassName gm cm =>
+        IsCompiledMethodAt gct hwfct definingClassName gm cm)
+      gm :=
+  findMemberInHierarchy_transportData
+    (findClass₁ := findGClass)
+    (findClass₂ := findCheckedClass)
+    (getMembers₁ := ClassDecl.methods)
+    (getMembers₂ := CheckedClass.methods)
+    (getName₁ := MethodDecl.name)
+    (getName₂ := CheckedMethod.name)
+    (ct₁ := gct)
+    (ct₂ := cct)
+    (memberName := mname)
+    mro
     (isCompiledClassTable_findClass_none hct)
-    (isCompiledClassTable_findClass hct)
-    (fun hgc hnone => isCompiledMethods_findMethod_none hgc.methods_compiled hnone)
-    (fun hgc hsome => by
-      obtain ⟨cm, hfcm, hmc⟩ := isCompiledMethods_findMethod hgc.methods_compiled hsome
-      exact ⟨cm, hfcm, _, hmc⟩)
+    (fun hfindClass =>
+      let lookup := isCompiledClassTable_findClass hct hfindClass
+      { class2 := lookup.value,
+        found := lookup.found,
+        related := lookup.related })
+    (fun hclass hnone => isCompiledMethods_findMethod_none hclass.methods_compiled hnone)
+    (fun {cname gc cc gm} hclass hfindClass hfindMethod =>
+      let lookup := isCompiledMethods_findMethod hclass.methods_compiled hfindMethod
+      { member2 := lookup.value,
+        found := lookup.found,
+        related := by
+          simpa [findGClass_name hfindClass] using lookup.related })
     hfind
 
 /-! ## Membership and provenance helpers -/
 
-theorem forall₂_mem_right {R : α → β → Prop}
-    (hf : Forall₂ R as bs) (hmem : b ∈ bs) : ∃ a ∈ as, R a b := by
-  induction hf with
-  | nil => cases hmem
-  | cons hr _ ih =>
-    cases hmem with
-    | head => exact ⟨_, .head _, hr⟩
-    | tail _ h =>
-      obtain ⟨a, ha, hr⟩ := ih h
-      exact ⟨a, .tail _ ha, hr⟩
-
-theorem forall₂_mem_left {R : α → β → Prop}
-    (hf : Forall₂ R as bs) (hmem : a ∈ as) : ∃ b ∈ bs, R a b := by
-  induction hf with
-  | nil => cases hmem
-  | cons hr _ ih =>
-      cases hmem with
-      | head => exact ⟨_, .head _, hr⟩
-      | tail _ h =>
-          obtain ⟨b, hb, hr⟩ := ih h
-          exact ⟨b, .tail _ hb, hr⟩
-
+/-- Project checked method membership back to a source class, source method, and
+nonempty method compilation artifact. This theorem is Prop-valued because its
+position witness is list membership. -/
 theorem traceMethodToSource
-    (hcompiled : IsCompiledClassTable gct cct)
+    (hcompiled : IsCompiledClassTable gct hwfct cct)
     (hfc : findCheckedClass cct cname = some cc)
     (hmem : cm ∈ cc.methods) :
-    ∃ gc gm, findGClass gct cname = some gc ∧
-      gm ∈ gc.methods ∧ IsCompiledMethodAt gct cname gm cm := by
-  obtain ⟨gc, hfg, hgc⟩ := isCompiledClassTable_findClass_reverse hcompiled hfc
-  obtain ⟨gm, hgm, hmc⟩ := forall₂_mem_right hgc.methods_compiled hmem
-  refine ⟨gc, gm, hfg, hgm, ?_⟩
-  simpa [findGClass_name hfg] using hmc
+    ∃ sourceClass sourceMethod,
+      findGClass gct cname = some sourceClass ∧
+      sourceMethod ∈ sourceClass.methods ∧
+      Nonempty (IsCompiledMethodAt gct hwfct cname sourceMethod cm) := by
+  let classLookup := checkedClass_lookup_to_source hcompiled hfc
+  obtain ⟨sourceMethod, hmethodMem, hmethod⟩ :=
+    forall2Data_mem_right_exists classLookup.related.methods_compiled hmem
+  refine ⟨classLookup.value, sourceMethod, classLookup.found, hmethodMem, ?_⟩
+  exact hmethod.elim (fun h => ⟨findGClass_name classLookup.found ▸ h⟩)
 
-theorem findCheckedClass_functional
-    (hfind₁ : findCheckedClass cct cname = some cc₁)
-    (hfind₂ : findCheckedClass cct cname = some cc₂) :
-    cc₁ = cc₂ := by
-  rw [hfind₁] at hfind₂; cases hfind₂; rfl
-
-theorem checkedClass_lookup_to_source
-    (hcompiled : ElaboratesProgramAt gp P cp)
-    (hfc : findCheckedClass cp.classes cname = some cc) :
-    ∃ gc, findGClass gp.classes cname = some gc ∧ IsCompiledClass gp.classes gc cc :=
-  isCompiledClassTable_findClass_reverse hcompiled.classes_elab hfc
-
-theorem compiledMethod_named_unique
-    (hwfct : WellFormedGClassTableCore gp.classes)
-    (hcompiled : ElaboratesProgramAt gp P cp)
-    (hfc : findCheckedClass cp.classes dname = some cc)
-    (hmem₁ : cm₁ ∈ cc.methods)
-    (hmem₂ : cm₂ ∈ cc.methods)
-    (hcm₁ : IsCompiledMethodAt gp.classes dname gm₁ cm₁)
-    (hcm₂ : IsCompiledMethodAt gp.classes dname gm₂ cm₂)
-    (hname : gm₁.name = gm₂.name) :
-    cm₁ = cm₂ := by
-  obtain ⟨gc, hfg, hgc⟩ := checkedClass_lookup_to_source hcompiled hfc
-  have hnodupSrc : List.Nodup (gc.methods.map MethodDecl.name) :=
-    hwfct.allMethodNamesDistinct _ _ hfg
-  have hnames :
-      gc.methods.map MethodDecl.name =
-        cc.methods.map CheckedMethod.name :=
-    forall₂_map_eq (fun gm cm h => by simp [h.name_eq]) hgc.methods_compiled
-  have hnodupChecked : List.Nodup (cc.methods.map CheckedMethod.name) :=
-    hnames ▸ hnodupSrc
-  have hcmName : cm₁.name = cm₂.name :=
-    hcm₁.name_eq.trans (hname.trans hcm₂.name_eq.symm)
-  exact findCheckedMethodInList_unique hnodupChecked hmem₁ hmem₂ hcmName
-
-/-! ## Main alignment theorem -/
-
+/-- A data-bearing class-table compilation artifact establishes the checked
+runtime alignment invariant consumed by safety and soundness. -/
 theorem alignedCheckedClassTable_of_compiled
-    (hwfct : WellFormedGClassTableCore gct)
-    (hcompiled : IsCompiledClassTable gct cct) :
-    AlignedCheckedClassTable gct cct where
+    (hcompiled : IsCompiledClassTable gct hwfct cct) :
+    AlignedCheckedClassTable gct hwfct.toWellFormedClassHierarchy cct where
   classLookupAgree := fun _ _ hfg => by
-    obtain ⟨cc, hfc, hgc⟩ := isCompiledClassTable_findClass hcompiled hfg
-    exact ⟨cc, hfc, hgc.name_eq, hgc.baseClasses_eq⟩
+    let lookup := isCompiledClassTable_findClass hcompiled hfg
+    exact ⟨lookup.value, lookup.found, lookup.related.name_eq,
+      lookup.related.baseClasses_eq⟩
   methodLookupAgree := fun _ _ _ _ _ _ _ _ hfgm => by
-    obtain ⟨cm, hfcm, _, hmc⟩ := isCompiledClassTable_findMethodInMro hcompiled hfgm
-    exact ⟨cm, hfcm, hmc.paramTy_eq, hmc.returnTy_eq,
-      hmc.paramTy_eq ▸ hmc.paramContract_eq, hmc.returnTy_eq ▸ hmc.returnContract_eq⟩
+    let lookup := isCompiledClassTable_findMethodInMro hcompiled hfgm
+    have ⟨hpEq, hrEq⟩ := lookup.related.interpTargets
+    exact ⟨lookup.member2, lookup.found, hpEq, hrEq⟩
   methodBodiesTyped := fun cname cc cm hfc hmem => by
-    obtain ⟨gc, gm, hfg, hgm, hmc⟩ := traceMethodToSource hcompiled hfc hmem
-    obtain ⟨hparamWf, hretWf⟩ := hwfct.allMethodSignaturesWellFormed _ _ _ hfg hgm
-    obtain ⟨hparamRt, hretRt⟩ := hwfct.allMethodSignaturesRuntimePublic _ _ _ hfg hgm
+    obtain ⟨gc, gm, hfg, hgm, ⟨hmc⟩⟩ := traceMethodToSource hcompiled hfc hmem
+    obtain ⟨hparamWf, _hretWf⟩ := hwfct.allMethodSignaturesWellFormed _ _ _ hfg hgm
+    obtain ⟨hparamRt, _hretRt⟩ := hwfct.allMethodSignaturesCheckedTarget _ _ _ hfg hgm
     have hclassWf : WellFormedGTy gct (.class_ cname) :=
       classTy_wellFormed_of_findGClass hwfct hfg
-    have hclassRt : RuntimePublicAnnotation gct (.class_ cname) :=
-      runtimePublicAnnotation_mk (CheckedTargetTy.classFormula FormulaGTy.class_)
-    have hsrcEnv :
-        SourceEnvOk gct
-          [{ name := gm.param, sourceTy := gm.paramTy },
-           { name := gm.receiverParam, sourceTy := .class_ cname }] := by
-      intro b hb
-      simp at hb
-      rcases hb with rfl | rfl
-      · exact ⟨runtimePublicAnnotation_to_sourceCallableTy _ hparamRt, hparamWf⟩
-      · exact ⟨.class_, hclassWf⟩
+    have hclassRt : CheckedTargetTy gct (.class_ cname) :=
+      CheckedTargetTy.classFormula FormulaGTy.class_
     have helab :
-        ElabEnvOk gct
+        ElabEnvOk gct hwfct.toWellFormedClassHierarchy
           [{ name := gm.param, sourceTy := gm.paramTy },
            { name := gm.receiverParam, sourceTy := .class_ cname }]
           [(gm.param, gm.paramTy),
@@ -313,30 +284,27 @@ theorem alignedCheckedClassTable_of_compiled
       .cons
         { name_eq := rfl, checked_target := hparamRt,
           checked_wf := hparamWf,
-          source_sub_checked := gradualSubtype_refl gct gm.paramTy }
+          source_sub_checked := gradualSubtype_refl gct hwfct.toWellFormedClassHierarchy gm.paramTy
+            hparamWf }
         (.cons
           { name_eq := rfl, checked_target := hclassRt,
             checked_wf := hclassWf,
-            source_sub_checked := gradualSubtype_refl gct (.class_ cname) }
+            source_sub_checked := gradualSubtype_refl gct hwfct.toWellFormedClassHierarchy (.class_ cname)
+              hclassWf }
           .nil)
-    obtain ⟨hwfctMethod, srcTy, hsrc, hbody⟩ := hmc.body_compiled
-    simpa [hmc.param_eq, hmc.receiverParam_eq, hmc.paramTy_eq, hmc.returnTy_eq, hbody,
-      runtimePublicTy_id] using
-      compileCheck_checked (.methodBody cname gm.name) hsrcEnv helab hwfctMethod hretRt hretWf hsrc
+    simpa [hmc.body_eq, hmc.param_eq, hmc.receiverParam_eq,
+      hmc.paramTy_eq, hmc.returnTy_eq, interpTarget_checkedTargetOfGTy] using
+      compileCheck_checked hwfct helab (.classFormula .any) .any hmc.body_hsrc
+        (.methodBody cname gm.name [])
   methodSignaturesWellFormed := fun cname _ cm hfc hmem => by
-    obtain ⟨gc, gm, hfg, hgm, hmc⟩ := traceMethodToSource hcompiled hfc hmem
+    obtain ⟨gc, gm, hfg, hgm, ⟨hmc⟩⟩ := traceMethodToSource hcompiled hfc hmem
     have ⟨p, r⟩ := hwfct.allMethodSignaturesWellFormed _ _ _ hfg hgm
-    exact ⟨hmc.paramTy_eq ▸ p, hmc.returnTy_eq ▸ r⟩
-  methodContractsCompiled := fun _ _ cm hfc hmem => by
-    obtain ⟨_, _, _, _, hmc⟩ := traceMethodToSource hcompiled hfc hmem
-    exact ⟨hmc.paramContract_eq, hmc.returnContract_eq⟩
-  methodSignaturesRuntimePublic := fun cname _ cm hfc hmem => by
-    obtain ⟨gc, gm, hfg, hgm, hmc⟩ := traceMethodToSource hcompiled hfc hmem
-    have ⟨p, r⟩ := hwfct.allMethodSignaturesRuntimePublic _ _ _ hfg hgm
-    exact ⟨
-      ⟨runtimePublicCheckedTargetShape_all _,
-        by simpa [hmc.paramTy_eq] using runtimePublicAnnotation_checked p⟩,
-      ⟨runtimePublicCheckedTargetShape_all _,
-        by simpa [hmc.returnTy_eq] using runtimePublicAnnotation_checked r⟩⟩
+    have ⟨hpEq, hrEq⟩ := hmc.interpTargets
+    exact ⟨hpEq ▸ p, hrEq ▸ r⟩
+  methodSignaturesCheckedTarget := fun cname _ cm hfc hmem => by
+    obtain ⟨gc, gm, hfg, hgm, ⟨hmc⟩⟩ := traceMethodToSource hcompiled hfc hmem
+    have ⟨p, r⟩ := hwfct.allMethodSignaturesCheckedTarget _ _ _ hfg hgm
+    have ⟨hpEq, hrEq⟩ := hmc.interpTargets
+    exact ⟨hpEq ▸ p, hrEq ▸ r⟩
 
 end Checked

@@ -164,15 +164,6 @@ theorem step_deterministic :
       cases h2 with
       | returnAwaitArgumentOk henf₂ => cases enforceValue_deterministic henf₁ henf₂
       | returnAwaitArgumentBlame => rfl
-  -- Return: call value
-  | returnCallValueBound hlook₁ =>
-      cases h2 with
-      | returnCallValueBound hlook₂ => rw [hlook₁] at hlook₂; cases hlook₂; rfl
-      | returnCallValueNotCallable hlook₂ => exact (payload_absurd hlook₁ hlook₂).elim
-  | returnCallValueNotCallable hlook₁ =>
-      cases h2 with
-      | returnCallValueBound hlook₂ => exact (payload_absurd hlook₂ hlook₁).elim
-      | returnCallValueNotCallable => rfl
   -- Return: enforce expression
   | returnEnforceOk henf₁ =>
       cases h2 with
@@ -198,13 +189,13 @@ theorem step_deterministic :
       | returnCondNotBool => rfl
   -- Blame propagation
   | blameUnwindAttrAccess | blameUnwindCallCallee | blameUnwindAwaitArgument
-  | blameUnwindCallValue | blameUnwindCond | blameUnwindReturnTo
-  | blameUnwindEnforce | blameUnwindDynAttrAccess =>
+  | blameUnwindCond | blameUnwindReturnTo | blameUnwindEnforce
+  | blameUnwindDynAttrAccess =>
       cases h2; rfl
   -- Error propagation
   | errorUnwindAttrAccess | errorUnwindCallCallee | errorUnwindAwaitArgument
-  | errorUnwindCallValue | errorUnwindCond | errorUnwindReturnTo
-  | errorUnwindEnforce | errorUnwindDynAttrAccess =>
+  | errorUnwindCond | errorUnwindReturnTo | errorUnwindEnforce
+  | errorUnwindDynAttrAccess =>
       cases h2; rfl
 
 theorem steps_final_eq

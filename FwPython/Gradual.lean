@@ -1,4 +1,5 @@
 import FwPython.Gradual.Language
+import FwPython.Gradual.SourceObligation
 import FwPython.Gradual.MRO
 import FwPython.Gradual.Invariants
 import FwPython.Gradual.Embedding

@@ -6,20 +6,21 @@
 #set text(size: 10.5pt)
 #set par(justify: true, leading: 0.68em)
 #set heading(numbering: "1.")
+#show table: body => block(breakable: false, body)
 
 #let formal(body) = text(size: 10pt, style: "italic")[#body]
 
-#let rule(name, premises, conclusion) = [
+#let rule(name, premises, conclusion, barWidth: 17em) = block(width: 100%, breakable: false)[
   #align(center)[
     #stack(
       dir: ttb,
-      spacing: 0.12em,
+      spacing: 0.4em,
       formal(premises),
       grid(
-        columns: (17em, auto),
+        columns: (barWidth, auto),
         column-gutter: 0.85em,
         align: center,
-        box(width: 17em)[#line(length: 100%)],
+        box(width: barWidth)[#line(length: 100%)],
         box[
           #align(right)[#text(size: 8.2pt, fill: luma(45%), style: "italic")[#name]]
         ],
@@ -41,99 +42,88 @@
   #text(size: 18pt, weight: "bold")[FwPython]
   #v(0.3em)
   #text(size: 11pt, fill: luma(40%))[
-    A Lean 4 development of a small object-oriented language with multiple
-    inheritance, class-only negative facts, and a checked-target gradual
-    metatheory
+    A Lean 4 specification and type safety proofs for a small
+    object-oriented language with static and gradual typing
   ]
 ]
 
 = Overview
 
-FwPython is a small object-oriented language formalized in Lean 4. The
-development has two halves. The first is a static core: a typed language with
-multiple inheritance, behavioral callable types, and a carefully limited form
-of negative typing. The second is a gradual layer that adds a dynamic type
-`any`, elaborates it into explicit runtime checks, and proves the resulting
-machine is sound.
+FwPython formalizes a small object-oriented language with multiple inheritance
+and first-class bound methods in Lean 4. Its static types combine class membership,
+class exclusion, and function requirements through unions and intersections.
+The development connects these types to method selection and execution.
 
-The two halves share one runtime model. Every value is an object reference.
-Ordinary objects live in the heap, and method values are represented by a
-distinguished kind of heap object whose class is `BoundMethod`. Both the static
-metatheory and the gradual metatheory reason about the same shapes, the same
-class table, and the same continuation machine.
+Static subtyping is defined by type equations. An executable comparison is proved
+to accept exactly the subtypes derived from those equations. Class intersections
+account for possible future subclasses while respecting C3 method resolution
+order and builtin sealing. Typed method bodies and compatible selected methods
+then connect the subtype algebra to static type safety.
 
-On the static side, class types are nominal and follow the C3 method
-resolution order (MRO). Callable types are behavioral: a value has type
-`P → R` when it can be invoked with at least `P` and returns at most `R`.
-Unions and intersections are primitive type constructors. Negative reasoning
-is intentionally narrow: a failed `isInstance(x, C)` test records one specific
-exclusion fact, written `negClass(C)`, rather than an arbitrary set-theoretic
-complement.
+The gradual system adds unknown type information, written `any`. Source inference
+retains declared function requirements while approximating unknown information
+with subtype bounds. Compilation inserts runtime checks with explicit source
+requirements. A correctly compiled execution that finishes returns a value of
+the expected type or reports a failed requirement as blame. Both safety results
+permit nontermination. The comparisons, method resolution search, compiler, and
+their proofs are constructive and use no classical choice.
 
-On the gradual side, the source language extends the static type language with
-`any`. Where the source program permits dynamic behavior, the elaborator
-inserts explicit boundaries into a checked target language. The checked
-runtime then turns dynamic mistakes into blame at a known boundary rather than
-into raw machine failure. The metatheory proves end-to-end soundness, traces
-each blame back to a unique compiled origin, and proves both the static and
-the dynamic gradual guarantees.
+= Runtime objects
 
-The development is constructive throughout. Subtyping is decidable on
-well-formed inputs. The MRO search is an executable function on the gradual
-side, not an existence proof. Elaboration is a plain definition, so the
-precision theorems compare concrete compiled programs rather than abstract
-witnesses.
+A program contains a class table and one main expression. The class table lists
+the class declarations and their methods. C3 computes each class's *method
+resolution order* (MRO): the class and its ancestors in method lookup order.
+Lookup selects the first class in that list that declares the requested method.
 
-= Shared Runtime Model
+Each class declares an ordered list of direct parents. A method declares its
+name, receiver variable, one argument variable, input and result types, and an
+expression body. The expression forms are:
 
-A FwPython program runs against three things: a class table whose MRO is
-computed by C3 linearization; a heap holding ordinary objects and bound-method
-objects; and a continuation machine that drives evaluation step by step.
+```text
+e ::= x | new C | e.m | e(e) | NONE | TRUE | FALSE
+    | if e then e else e | isInstance(x, C)
+```
 
-Bound methods are not a separate semantic universe. They are heap objects with
-a distinguished payload, sharing storage with ordinary objects. As a
-consequence, the same object reference can simultaneously support a class view
-and a callable view. The static side exploits this by routing all callable
-reasoning through the nominal class `BoundMethod`. The gradual side exploits
-it by treating callable checks, attribute access, and call execution as
-uniform operations on object references.
+This is notation for the abstract syntax; the project has no text parser.
+`isInstance` tests a variable, which permits branch typing to refine its type.
 
-This bound-method carrier is a deliberate simplification of Python's actual
-callable hierarchy. Real Python realizes callability through many distinct
-mechanisms — plain functions, lambdas, bound methods, classmethod and
-staticmethod descriptors, built-in functions, callable user-defined instances
-(anything with `__call__`), and class types themselves. FwPython collapses
-all of these into a single runtime carrier: every callable value is a
-bound-method heap object, and method binding — a fresh bound-method
-allocation at attribute access — is the only way to obtain one. The benefit
-is that the metatheory has a single nominal anchor for callability,
-`class BoundMethod`, and only one operational story for every callable
-interaction. The cost is that FwPython cannot capture patterns that depend
-on Python's plurality of callable kinds, such as `__call__` on user-defined
-classes or first-class functions distinct from methods.
+The machine evaluates expressions using a heap and a variable environment.
+Every value is an object reference. A heap object stores a runtime class name
+and a *payload*: either an ordinary-object marker or a method definition paired
+with its receiver. The receiver is the object on which the method runs.
+
+Method attribute lookup allocates an object of class BoundMethod containing this
+pair. Such a value has both a class type and a function type. Only bound methods
+can be called; the language has no separate function objects or user-defined
+`__call__` methods.
+
+The initial heap contains NONE of class NoneType and TRUE and FALSE of class
+Bool. `new C` requires a declared class and excludes Bool, NoneType, and
+BoundMethod. Constants and method attribute lookup supply values of these classes.
 
 = Static Core
 
 == Judgments and Type Language
 
-The static metatheory is built around four judgments. Expression typing is
-written `HasType ct Γ e T`, runtime value typing is written
-`ValueHasType ct h v T`, method-signature lookup is written
-`FindMethodType ct cname methodName paramTy returnTy`, and declarative
-subtyping is written `IsSubtype ct T U`. Each one assumes the class table
-`ct` is well-formed (`WellFormedClassTable ct`), and the runtime judgments
-also assume the heap is well-formed (`HeapWellFormed ct h`). These
-assumptions are semantic invariants rather than checker artifacts: they
-package the MRO, lookup, and shape facts that the soundness proof needs.
-In the implementation, the definition-only `HasType` core lives in
-`FwPython/Static/TypeSystem/Typing.lean`, while theorem support lives in
-`FwPython/Static/TypeSystem/TypingLemmas.lean`; the split keeps the static
-judgment available below the heavier proof imports without recreating the
-old import cycle.
+Fix a class table `ct` and its validated hierarchy. Let Γ assign types to
+variables, h be a heap, e an expression, v an object reference, and T a type.
+Every class name in a type must be declared. A *valid type package* pairs an
+annotation with proof of this condition. The Lean judgments are:
 
-A single static type language `Ty` is used throughout — for method
-annotations, expression typing, runtime value typing, declarative subtyping,
-and the denotational semantics. The forms are summarized below.
+- `HasType hierarchy Γ e T`: expression `e` has type `T` under variable types `Γ`.
+- `ValueHasType hierarchy h v T`: value `v` in heap `h` has type `T`.
+- `FindMethodType ct cname methodName paramTy returnTy`: method lookup finds the stated input and result types.
+- `TypeEquivalence context T U`: the type laws derive an equation between valid type packages T and U.
+- `IsSubtype hierarchy T U`: T and U are valid annotations, and the equations prove that `T | U` equals `U`.
+
+`hierarchy : WellFormedClassHierarchy ct` supplies the class declarations found by
+lookup and their computed MROs.
+The execution proofs require a well-typed class hierarchy and a well-formed heap.
+These requirements supply the inheritance, method lookup, and object storage facts used in the proofs.
+
+The static type language is `Ty`.
+Method annotations, expression types, runtime types, and subtype checks use this language.
+The following table gives the type forms.
 
 #table(
   columns: (1.7fr, 2.4fr),
@@ -141,121 +131,151 @@ and the denotational semantics. The forms are summarized below.
   stroke: luma(80%),
   [Type form], [Meaning],
 
-  [`class C`], [Objects whose runtime class lies under `C` in the MRO.],
-  [`negClass(C)`], [Objects whose runtime-class MRO excludes `C`.],
-  [`P → R`], [Objects that can be invoked with at least `P` and return at most `R`.],
-  [`T | U`], [Union type.],
-  [`T & U`], [Intersection type.],
+  [`class C`], [The runtime class has `C` in its MRO.],
+  [`negClass(C)`], [The runtime class does not have `C` in its MRO.],
+  [`P → R`], [A callable object. Calls on `P` inputs must not fail. Any returned result must have type `R`.],
+  [`T | U`], [Values with type `T`, type `U`, or both.],
+  [`T & U`], [Values with both type `T` and type `U`.],
   [`bottom`], [The empty type.],
 )
 
-The universal supertype is `class Object`. `HasType` is the only public
-static typing judgment. The static-to-gradual bridge and the algorithmic
-completeness proofs may package extra lookup or dispatch witnesses
-internally, but they do so over the same `Ty` rather than introducing a
-parallel annotation language. Keeping one type language means the meaning of
-an annotation is the same wherever it appears: in the typing rules, in the
-runtime invariants, and in the semantic interpretation.
+Every value has type `class Object`.
+A call of type `P → R` can run forever.
+This type restricts returned results and failures; it does not require termination.
 
-== Declarative Subtyping
+== Subtyping
 
-`IsSubtype` is declarative: it is a syntactic relation closed under a fixed
-set of rules, with no commitment to a particular search order. This matters
-because the public theorem surface, including the runtime inversion lemmas,
-should not depend on how an algorithm chooses to discharge a subtyping
-obligation.
+Subtyping determines whether a value of one type can be used where another
+is required. Every Bool is an Object, for example, so `Bool <: Object`.
+We express this through a type equation: adding Bool as an alternative in
+`Bool | Object` does not change Object. In general,
 
-The relation combines several familiar pieces. There is a preorder, with
-reflexivity and transitivity. There is a bounded distributive lattice over
-unions and intersections, with `bottom` on the left, `class Object` on the
-right, the usual elimination and introduction rules, and forward
-distributivity of intersection over union. On top of that lattice sit the
-nominal, behavioral, and negative fragments described next.
+```text
+T <: U  means  T | U ≈ U
+```
 
-The nominal class rule reads class subtyping off the MRO:
+Here, `≈` is equality derived from the type laws. To prove a subtype rule,
+we show that its defining union equation follows from those laws.
 
-#rule(
-  "S-Class",
-  stack(
-    dir: ttb,
-    spacing: 0.12em,
-    [MRO(C) = M],
-    [A ∈ M],
-  ),
-  [class C <: class A],
-)
+=== The laws behind the basic rules
 
-Callable types are behavioral. A callable subtype must accept at least as
-much input and produce at most as much output:
+Union combines alternatives, while intersection combines requirements.
+Their laws form a bounded distributive lattice: we can reorder and regroup
+both operations, repeated types have no effect, intersection distributes
+over union, bottom is the least type, and Object is the greatest.
+
+These equations explain the basic subtype rules. Repetition gives
+`T | T ≈ T`, hence `T <: T`. Absorption gives `T | (T & U) ≈ T`, hence
+`T & U <: T`: a value satisfying both requirements satisfies T. Equations
+also compose to give transitivity. If `T | U ≈ U` and `U | V ≈ V`, then
+
+```text
+T | V ≈ T | (U | V) ≈ (T | U) | V ≈ U | V ≈ V
+```
+
+so `T <: V`. The same laws give the equivalent subtype test `T & U ≈ T`,
+which is convenient for proofs about simultaneous requirements.
+
+=== Adding the class hierarchy
+
+The lattice laws tell us how to combine types; the class laws supply the
+hierarchy facts. If A occurs in C's MRO, every C object also belongs to A.
+The inheritance equation records this as
+
+```text
+class C & class A ≈ class C
+```
+
+Using the intersection test above immediately gives `class C <: class A`.
+In particular, Bool's MRO contains Object, which justifies the example at
+the start of this section. Class exclusion and builtin sealing supply further
+hierarchy equations, described in @class-exclusion.
+
+=== Deriving the function rule
+
+A function type `P → R` requires calls on P inputs to accept those inputs and
+give every returned result type R. The function equations describe how these
+input and result requirements combine:
+
+```text
+(P | Q) → R ≈ (P → R) & (Q → R)
+P → (R & S) ≈ (P → R) & (P → S)
+```
+
+The first says that accepting either input means satisfying both input
+requirements. Since `Object | Bool ≈ Object`, it gives
+`(Object → R) & (Bool → R) ≈ Object → R`. By the intersection test,
+`Object → R <: Bool → R`: accepting a broader input makes a function usable
+where a narrower input is required.
+
+The second equation explains the result direction. Since
+`Bool & Object ≈ Bool`, it gives
+`(P → Bool) & (P → Object) ≈ P → Bool`. Thus,
+`P → Bool <: P → Object`: returning a narrower result satisfies a broader
+result requirement. The general rule follows from these two derivations:
 
 #rule(
   "S-Callable",
   stack(
     dir: ttb,
-    spacing: 0.12em,
+    spacing: 0.35em,
     [P' <: P],
     [R <: R'],
   ),
   [P → R <: P' → R'],
 )
 
-Behavioral callable types still need to be reconciled with the runtime: every
-callable value at runtime is a bound-method heap object. The next rule is the
-one-way bridge that exposes this fact in the static system.
+This also explains how to summarize different requirements on one function. From
+`P → R` and `Q → S`, result subtyping first widens each result to `R | S`. The
+first function equation applies once both result types agree:
 
-#rule(
-  "S-Callable-BoundMethod",
-  stack(
-    dir: ttb,
-    spacing: 0.12em,
-    [ct(BoundMethod) is defined],
-    [MRO(BoundMethod) = M],
-  ),
-  [P → R <: class BoundMethod],
-)
+```text
+(P → (R | S)) & (Q → (R | S)) ≈ (P | Q) → (R | S)
+```
 
-The bridge goes only one way. Callables are always `BoundMethod` instances,
-but the system does not assume every `BoundMethod` instance inhabits an
-arbitrary callable type. Finally, intersections of callables can be combined
-into a single callable with a unioned domain and an intersected codomain:
+Composing result widening with this equation gives
 
-#rule(
-  "S-Callable-InterUnion",
-  [],
-  [(P → R) & (Q → S) <: (P | Q) → (R & S)],
-)
+```text
+(P → R) & (Q → S) <: (P | Q) → (R | S)
+```
 
-The codomain `R & S` may look too strong at first glance — calling the
-function with a `P` input yields an `R`, not necessarily an `R & S`. The
-rule is sound because FwPython reads callable types intensionally. A
-bound-method object stores exactly one parameter type and one return
-type, and inhabiting both `P → R` and `Q → S` forces that single stored
-signature to be wider than `P` and `Q` in the parameter and narrower
-than `R` and `S` in the return. The same object therefore inhabits the
-unified `(P | Q) → (R & S)` directly. This is the rule that lets the
-typing rules collapse an intersection of callable views into one
-callable wherever a single one is expected.
+If the two requirements have the same input type P, both results are required;
+the second function equation gives `P → (R & S)` directly.
 
-== Class-Only Negative Fragment
+One further equation connects function types to callable objects:
+`bottom → R ≈ class BoundMethod`. With no possible input, the result requirement
+places no restriction on results, but the value must still be callable.
+Because bottom is below every input type, the function rule also gives
+`P → R <: bottom → R`, so every function value belongs to BoundMethod.
+An empty result has a different meaning: `P → bottom` can describe a method
+that runs forever on P inputs, and therefore need not be an empty type.
 
-Negative typing is the most carefully constrained part of the static design.
-Most type systems either avoid negation entirely or admit a generic semantic
-complement. FwPython does neither. It introduces a single negative form,
-`negClass(C)`, whose meaning is anchored in a runtime fact that the system
-can actually witness: the runtime class's MRO does not contain `C`.
+All these rules are derived in Lean from `TypeEquivalence` in `Algebra.lean`.
+The equations use a validated hierarchy and type packages whose class names
+are declared. Operations preserve that validity, so derivations can build
+intermediate types without repeating name checks.
 
-Three primitive rules define the fragment. The first lifts a runtime
-exclusion fact about a sealed built-in class into subtyping. The second
-expresses that every object is either an instance of a class or an instance
-of its negation. The third makes class membership and class exclusion mutually
-exclusive at the type level.
+`WellFormedClassHierarchy` supplies the names and valid MROs needed by these equations.
+Method typing itself uses subtyping, so the hierarchy facts must be available before
+method bodies are checked. `WellTypedClassHierarchy` extends `WellFormedClassHierarchy`
+with typed method bodies, compatible overrides, and declaration consistency.
+Its method typing proofs justify method execution.
+
+== Class exclusion <class-exclusion>
+
+`negClass(C)` means that the object's runtime class does not have `C` in its MRO.
+
+The following laws state three facts.
+A sealed class excludes names absent from its MRO.
+Every object either has class `C` or excludes that class.
+No object can both have and exclude class `C`.
 
 #rule(
   "S-SealedClass-NegClass",
   stack(
     dir: ttb,
-    spacing: 0.12em,
-    [LeafBuiltin(B)],
+    spacing: 0.35em,
+    [B ∈ sealedClasses],
     [ct(B) = b],
     [MRO(b) = M],
     [D ∉ M],
@@ -275,33 +295,15 @@ exclusive at the type level.
   [class C & negClass(C) <: bottom],
 )
 
-The premise `LeafBuiltin(B)` is restricted to exactly three classes:
-`Bool`, `NoneType`, and `BoundMethod`. This restriction is the open-world
-boundary of the design. A user-defined class might be extended later with new
-subclasses, so the fact that no shared subclass exists right now is not a
-sound basis for a global non-overlap fact. The three designated built-ins are
-sealed by `WellFormedClassTable`: the class table guarantees they cannot
-acquire new descendants, so primitive global exclusion against them is safe.
+`sealedClasses` contains Bool, NoneType, and BoundMethod. No different class can
+inherit from these sealed classes. `WellFormedClassHierarchy` supplies this restriction.
 
-What `negClass(C)` means is therefore exactly one thing: the runtime-class
-MRO excludes `C`. It is not a generic semantic complement, not a non-overlap
-claim about user-defined classes, and not a coarse callable / non-callable
-summary type. The fragment intentionally stops short of those because there
-is no runtime evidence to support them.
+A valid future hierarchy can give two user classes a common subclass, so their
+intersection remains possible. Conflicting MRO orders can rule out such a class
+and make the intersection empty.
 
-#theorem(
-  "Theorem",
-  "Class-Only Negative Helpers",
-  [The library in `Negation.lean` exposes the callable-to-`BoundMethod`
-   bridge, the leaf-built-in exclusion theorem, subtype-driven contradiction,
-   antitonicity of `negClass`, the contradiction between callables and
-   `negClass(BoundMethod)`, and the corollary that classes outside
-   `MRO(BoundMethod)` are disjoint from all callables.],
-)
-
-The library deliberately offers no pseudocomplement law, no generic De Morgan
-package, and no general negation-introduction rule. Every consequence is
-derived from the three primitive rules above and from concrete MRO facts.
+`Negation.lean` provides proofs that use these class membership and exclusion facts.
+For example, a callable value cannot have type `negClass(BoundMethod)`.
 
 == Static Typing and Runtime Typing
 
@@ -309,678 +311,625 @@ The expression typing judgment
 
 #align(center)[#formal([Γ ⊢ e : T])]
 
-contains the rules one would expect from an object language with intersection
-types: attribute access uses a class view of the receiver, calls consume
-callable types, ordinary conditionals require a boolean test and return the
-union of the two branch result types, and intersection introduction is general
-at the term level so that a method value can be assigned a conjunction of
-callable types.
+assigns a type to an expression.
+Attribute access finds a method on the receiver's class.
+A call requires a function type and an argument that fits its input type.
+A conditional requires a Boolean test and returns the union of its branch result types.
+The same expression can receive an intersection type when it satisfies both component types.
 
-The interesting rule is the specialized `isInstance` conditional. It keeps the
-same union-shaped result as an ordinary conditional, but each branch of an
-`isInstance(x, C)` test refines the type of `x` differently:
+The test `isInstance(x, C)` adds information about `x` in each branch:
 
 #rule(
   "T-IfIsInstance",
   stack(
     dir: ttb,
-    spacing: 0.12em,
+    spacing: 0.35em,
     [Γ(x) = T],
     [ct(C) is defined],
     [Γ[x ↦ T & class C] ⊢ e_t : R_t],
     [Γ[x ↦ T & negClass(C)] ⊢ e_f : R_f],
   ),
   [Γ ⊢ if isInstance(x, C) then e_t else e_f : R_t | R_f],
+  barWidth: 29em,
 )
 
-The positive branch records confirmed class membership. The negative branch
-records exactly one nominal exclusion fact — not an arbitrary semantic
-complement — and the overall conditional still reports the ordinary union of
-the two branch results. This is the source of the design choice that pushed
-`negClass(C)` into the type language in the first place.
+The positive branch adds type `class C` to the type of `x`.
+The negative branch adds `negClass(C)`.
+The conditional returns the union of the two branch result types.
 
-Runtime typing is expressed by `ValueHasType ct h v T`. Because every value
-is an object reference, this judgment offers several views of the same
-underlying heap object: a class view (from the runtime class and its MRO);
-a callable view (from a bound-method payload); a class-only negative view
-(from a witness that the runtime MRO excludes a target class); and the
-general subsumption and intersection-introduction rules.
+`ValueHasType hierarchy h v T` assigns a type to a heap reference.
+The same reference can have a class type, a function type, or a class exclusion type.
+Subtype rules and intersection rules can assign further types.
 
-The negative-typing constructor `ValueHasType.objRefNegClass` is what
-operationally justifies the negative-branch refinement above. It requires a
-heap lookup for the object, the existence and MRO of the target class, the
-existence and MRO of the object's runtime class, and a proof that the target
-class name is absent from the runtime MRO. The runtime rule therefore carries
-exactly the same evidence — an MRO membership check — that the type-level
-rule and the semantic interpretation will need.
+`ValueHasType.objRefNegClass` requires the object's runtime MRO to exclude the tested class.
+The execution proof uses the actual MRO check result.
 
-== Semantic Foundation
+== Future class hierarchies
 
-To justify subtyping, FwPython gives types a denotational interpretation.
-Rather than denoting types as classical sets, the development uses a small,
-purpose-built semantic carrier:
+If A and B inherit only Object, a future program can add `C(A, B)`. The
+intersection `A & B` must therefore remain possible even when the current
+program has no common subclass. A *complete class conjunction* fixes whether
+each known class is included or excluded. A *common MRO order* has no repeated
+name and contains every included class's entire MRO in its order.
+`hasValidClassOrder` checks it by applying C3 merge to those MRO lists.
 
-#align(center)[#formal([SemObject ::= ordinaryCurrent(C, M) | ordinaryFresh(seeds) | boundMethod(P, R, M)])]
+A conjunction meets the *conjunction constraints* when it includes Object and
+every included class's ancestors, respects builtin sealing, and has a common
+MRO order. The subtype comparison keeps these conjunctions because they can
+describe objects of an existing class or a future subclass.
 
-The first case represents an existing well-formed instance of class `C` with
-MRO `M`. The second case represents a hypothetical instance of a fresh class
-that is not yet in the table but whose MRO would respect a list of seed
-ancestors. The third case represents a bound-method object with stored
-parameter and return types. Types are interpreted pointwise:
+Future classes must still have valid C3 MROs and respect builtin sealing. This
+excludes a common subclass of `A(X, Y)` and `B(Y, X)`: one parent requires X before
+Y, while the other requires Y before X. Each parent is valid on its own, but no class
+can preserve both orders.
 
-- `class C` denotes objects whose runtime-class MRO contains `C`,
-- `P → R` denotes bound-method objects whose stored signature is wider in the
-  parameter and narrower in the return,
-- `negClass(C)` denotes objects whose runtime-class MRO excludes `C`,
-- and `union`, `intersection`, and `bottom` use the usual propositional
-  clauses.
+For any class in an extension with a valid hierarchy,
+`classIntersectionOfExtension` computes its complete class conjunction from its
+MRO and returns a proof that the conjunction constraints hold. This justifies
+making a type empty when those constraints fail. Conversely,
+`extendWithClassIntersection` constructs a separate valid extension for each
+complete class conjunction that meets the constraints. The conjunctions can use
+different extensions; this justifies keeping every conjunction that meets the
+constraints.
 
-Semantic subtyping is then plain denotation preservation:
+This is a guarantee about ancestry and MROs. Static program checking also requires
+compatible methods. An empty subclass can inherit two methods with the same name and
+incompatible signatures; it has a valid MRO but fails `LiskovCondition`, so the
+program is rejected.
 
-#align(center)[
-  #formal([SemSubtype(ct, T, U) := ∀ obj, T.semDenotes(ct, obj) → U.semDenotes(ct, obj)])
-]
+== Deciding subtyping
 
-The `ordinaryFresh` case is what makes the semantics open-world-sound. Proving
-a subtyping claim wrong sometimes requires imagining a hypothetical class that
-the current table does not yet contain. Rather than quantifying over all
-possible extensions of the class table, FwPython packages those hypothetical
-witnesses inside the semantic carrier itself. The benefit is that
-`SemSubtype` stays pointwise in one class table, and the well-formedness
-predicate on types stays local to that table as well. The decision procedure
-can then operate on a single semantic universe rather than alternating between
-syntax and an external extension relation.
+`splitIntoIntersections` computes a type's *normal form*: a list of
+intersections whose union equals the original type. It also returns a proof of
+that equation. The normalizer distributes `(A | B) & C` into `(A & C) | (B & C)`
+and splits class types and exclusions into complete class conjunctions.
+Inheritance, sealing, and incompatible MROs determine which conjunctions remain
+possible. The lattice and class equations justify these transformations. This
+puts alternatives and class restrictions into a form the subtype comparison can
+inspect, with a proof that the transformations preserve the original type.
+Function requirements are compared together, because separate requirements can cover
+separate inputs. For example,
+
+```text
+(Bool → Bool) & (NoneType → NoneType)
+```
+
+covers a `Bool | NoneType` input with a `Bool | NoneType` result, even though neither
+input requirement covers that union alone. The recursive check decreases an explicit
+depth limit. Smaller function nesting keeps a sufficient limit from running out.
+Increasing an already sufficient limit leaves the answer unchanged; this is called
+*depth independence*.
 
 #theorem(
   "Theorem",
-  "Semantic Soundness of Subtyping",
-  [If `T <: U`, then `SemSubtype(ct, T, U)`. In particular, every semantic
-   object denoted by `T` in `ct` is also denoted by `U` in `ct`.],
-  proof: [The positive cases are routine lattice and MRO transport. The
-    negative cases compare positive and negative witnesses for the same runtime
-    shape, use MRO determinism to align the witness lists, and derive the
-    contradiction from stored MRO membership or exclusion facts.],
+  "Subtype comparison agrees with the type equations",
+  [For valid type packages, `checkSubtypeBool_iff_subtype` states that the
+   Boolean comparison accepts exactly the subtypes derived from the equations.],
+  proof: [Induction on function nesting turns a true answer into a subtype proof.
+    A false answer must rule out every possible derivation, including ones that
+    rewrite inside types or pass through intermediate types. The proof checks
+    that each stated equation is accepted in both directions and that comparison
+    respects component rewrites and transitivity. Depth independence handles
+    intermediate types with deeper nesting. Every derivation therefore passes,
+    so a false answer rules out a subtype proof.],
 )
 
-#theorem(
-  "Theorem",
-  "Constructive Characterization of Subtyping",
-  [On well-formed inputs, declarative subtyping and semantic subtyping
-   coincide: `IsSubtype ct T U` iff `SemSubtype ct T U`. The development also
-   derives constructive decision procedures `isSubtype_decidable` and
-   `semSubtype_decidable` from this equivalence.],
-  proof: [Completeness searches over a shared decision space that either builds
-    a declarative subtyping derivation or returns one `SemObject`
-    counterexample witnessing semantic failure. The open-world cases are
-    carried by `ordinaryFresh` objects rather than by a separate quantification
-    over extended class tables.],
-)
+The proof-producing decision is `WellFormedType.subtypeDecidable`. Raw
+annotations enter through name validation; subsequent comparisons reuse the
+proof stored with each type. The subtype relation itself is defined by the
+equations, so its definition does not depend on the subtype comparison.
 
-== Static Proof Architecture
+== Deciding expression typing
 
-Two engineering choices structure the static proofs. First, `IsSubtype` is
-kept declarative, with transitivity as a primitive rule. Second, semantic
-soundness is proved before the runtime metatheory, and the runtime proofs
-recover their inversion lemmas from that semantic result.
+Declarative typing can assign several types to one expression, including their
+intersection. An executable checker therefore needs more than one inferred
+type. `inferBasis` constructs a finite collection of valid candidate types and
+closes it under nonempty intersections. Each candidate has a typing proof.
+Completeness means that every declarative result type has a candidate below it.
 
-Both choices serve the same goal: insulating the public theorem surface from
-the choice of search algorithm. If transitivity were eliminated, the runtime
-inversion lemmas would have to be phrased in terms of an algorithm's case
-analysis, which would change every time the algorithm changed. By going
-through semantic subtyping instead, the inversion lemmas can speak about the
-meaning of a type rather than about the shape of a particular derivation.
+To check a call without executing it, `callableSummaries` produces input and
+result pairs called *summaries*. Each pair describes a function type above the
+callee's type. An argument below the pair's input permits the call, and the
+pair's result is compared with the requested type. Combining requirements
+accounts for overlapping inputs of one function and for alternative functions.
 
-The runtime preservation cases follow the runtime representation directly.
-Attribute access allocates a fresh bound-method object. Calls recover
-callable provenance from heap facts. The `isInstance` rule narrows the
-typing environment with `class C` on one branch and `negClass(C)` on the
-other. Each of these mirrors the corresponding small-step rule.
+A callee that could be an ordinary object fails checking. If its type is below
+bottom, its summary is `(Object, bottom)`: every argument fits, but evaluating
+the callee cannot return. For a callable type that is not below bottom, an empty
+collection of requirement subsets gives a summary equivalent to
+`(bottom, bottom)`. It accepts an argument expression that cannot return, so
+execution cannot reach the call. Each summary supplies the input and result
+types for an instance of the static call typing rule.
+
+`checkHasType?` accepts a requested annotation T when its class names are valid
+and some candidate is below T. For a well-typed hierarchy and valid variable
+types, `checkHasType?_iff_hasType` proves agreement with declarative typing.
+Candidate soundness and subsumption justify acceptance. Candidate completeness
+and subtype decidability ensure that every typing derivation is accepted.
+
+== Proof of static type safety
+
+The heap rules require a BoundMethod object to contain a receiver and method.
+Ordinary object creation excludes that class.
+Method allocation creates an object with the required class and payload.
+Every execution step preserves these facts.
+
+The proof uses `objectTypeLowerBound`: it fixes the object's class membership
+from its actual MRO and, for bound methods, adds `Object → bottom`. With a
+well-typed class hierarchy and a well-formed heap, `valueHasType_lowerBound`
+places this type below every type assigned to a reference whose lookup finds that exact object.
+For a known class D, this *object lower bound* is below an exclusion of D exactly
+when D is outside the MRO. This type supports algebraic inversion; method body
+typing supplies the execution guarantee.
+
+The object's own class C is inside the MRO, so the
+object lower bound cannot be below an exclusion of C. If it were below bottom,
+it would be below that exclusion too, giving a contradiction.
+`objectTypeLowerBound_nonempty` states that the object lower bound is not below
+bottom. If a typed heap value had type bottom,
+`valueHasType_lowerBound` would place its object lower bound below bottom,
+contradicting that nonemptiness theorem. This proves
+`valueHasType_bottom_impossible` for every typed heap value under a well-typed
+class hierarchy and a well-formed heap.
+
+A method declared `Bool → Bool` can be called with required result Object.
+Preservation must relate its declared Bool result to that Object result once the
+argument returns. That return matters: an argument expression of type bottom can
+run forever, and `bottom → R` imposes no result restriction. Once argument
+evaluation produces a typed value, its type cannot be below bottom. Function
+inversion can then compare the declared result with the result required at the
+call.
+
+Preservation proves that execution keeps the heap and machine types valid.
+Progress proves that a valid state can take a step or has already finished.
+The `isInstance` cases use the actual class membership test result.
+`Heap.initial_wellFormed` proves every heap rule for the pre-allocated None and Boolean objects, including `boundMethodShape`.
+`SmallStep.program_soundness` applies static safety to a typed program that starts with that heap and an empty environment.
 
 #theorem(
   "Theorem",
   "Static Type Soundness",
-  [Assume a well-formed class table, a well-formed heap, a runtime
-   environment matching the typing environment, and a derivation
-   `Γ ⊢ e : T`. If the continuation machine terminates, then it finishes with a
-   successful value `v` such that `ValueHasType ct h' v T`.],
-  proof: [Safe states package heap well-formedness, environment typing,
-    control typing, and continuation compatibility. Preservation shows that one
-    safe state steps to another, progress rules out stuck safe states, and
-    final-state inversion extracts the successful value case.],
+  [`SmallStep.soundness` assumes a well-typed class hierarchy, a well-formed heap,
+   and runtime variable values that satisfy their assigned types. If expression e has type T
+   and execution terminates, it returns a value of type T.],
+  proof: [Preservation proves that each step keeps the heap and machine types valid.
+    Progress proves that a valid unfinished state can take a step.
+    The final state contains a successful value of type T.],
 )
 
 = Gradual Layer
 
-== From `any` to Boundaries
+== Unknown types and runtime checks
 
-The gradual side starts from a single design tension. The source language
-admits the type `any`, which represents a value the type system has lost
-track of. Any sound treatment of `any` has to answer two questions. What
-can the type system still guarantee about programs that contain `any`?
-And what should happen, operationally, when an `any`-typed value reaches
-a context that demanded something more specific?
+`any` permits unknown type information.
+For example, a value of type `any` can reach an expression that requires a function.
+The runtime checks whether the value is a bound method before calling it.
+If this check fails, the machine reports blame.
 
-A first instinct is to absorb `any` into the existing subtyping relation —
-make `any` both a subtype and a supertype of every other type, and the
-static system can keep doing what it always did. This does not work, for
-two related reasons.
+The compiler records a source location and requirement for each check.
+`BlameInfo.obligation` identifies the reported requirement.
+`BlameInfo.cause` identifies the operation and value that failed.
 
-The first reason is that the move trivializes subtyping. With `any` both
-above and below every type, transitivity gives `T <: U` for any `T` and
-`U`: simply route through `any` in the middle. Subtyping collapses to the
-trivial relation that holds between every pair of types, and nothing ever
-fails to type-check. Gradual typing systems usually avoid this collapse by
-replacing subtyping with a weaker, non-transitive relation called
-*consistency*. Consistency lets `any` participate in compatibility checks
-without turning every other check vacuous.
+The type safety theorem applies to correctly typed compiled programs.
+If execution reaches a final state, the result is a value of the expected type or blame.
+The theorem excludes `runtimeError` for these executions.
+It does not require termination.
 
-The second reason is deeper, and it survives the move to consistency.
-Whatever the static system does or does not accept, *some operations will
-still fail at runtime*. An `any`-typed value can flow into a context that
-expected a callable, a class instance, or a particular intersection, and
-sometimes the value will fit and sometimes it will not. Those failures are
-not an optional feature — they are the only honest response to a source
-program that declined to commit to a static contract. The real design
-question is therefore not whether to defer checks to runtime, but how.
+== Program translation
 
-A naive answer is to compile `any` away by inserting implicit runtime
-coercions and let the underlying machine raise an error when an operation
-turns out to be impossible. This is operationally feasible, but it makes
-both diagnostics and metatheory poor. When a failed `.foo` access on an
-`any`-typed value crashes the runtime, no one can say which compile-time
-decision is responsible. The type system declined to reject the access, but
-it does not know *why* it declined or *where* in the source the mistake
-ultimately lies.
+The program passes through three stages:
 
-FwPython takes the opposite stance. Every operation that the type system
-admits *only* because of `any` is marked at compile time with an explicit
-runtime check and a blame label. The check is performed at exactly the
-moment the value crosses into a more demanding context. The label records
-which compile-time decision is responsible for the cross. The runtime
-never has to invent diagnostic information after the fact, because the
-diagnostic information was attached to the program when the boundary was
-inserted.
++ `GSrcInfer` assigns one source type to each expression.
++ `compileCheck` translates the expression and adds runtime checks.
++ The checked machine executes the translated program.
 
-This refines what *soundness* can mean. A fully static type system can
-promise that well-typed programs do not fail. A gradual system cannot
-promise that, because the source language explicitly admits operations
-whose safety is not statically decidable. What it can promise instead is
-that failure is *localized*. A well-typed elaborated program in FwPython
-finishes in one of exactly two ways. Either it succeeds, and the result
-really does have the type the source typing claimed; or it fails with
-blame at a specific boundary that the elaborator inserted. Crucially, it
-does not get stuck in unchecked machine behavior — a compiled well-typed
-run cannot reach a raw attribute-not-found, call-on-non-callable, or
-similar primitive failure.
+The source environment stores one type for each variable.
+The compiler selects the type used by each runtime check at the use of an expression.
+This check type is called a *target*.
+The source type and the target can differ.
 
-This localized form of soundness shapes the rest of the gradual layer. The
-high-level strategy is the same one that runs through the gradual typing
-literature, specialized to FwPython: keep the static type system honest
-about what it really decides; defer the rest to runtime; make every
-deferral explicit syntax rather than implicit coercion; track responsibility
-so failures are diagnostic; and keep the runtime model uniform so that the
-metatheory has only one operational story to reason about.
+The execution proofs use the checks stored in the compiled expression.
+They prove that each machine step preserves the typing requirements.
 
-These informal commitments become formal theorems later in this layer,
-and they fall into two groups. The first group formalizes the
-localized-failure claim directly. _Gradual Soundness_ says that a compiled
-well-typed run finishes either with a witnessed value or with blame —
-never with raw machine failure. _Blame Correctness_ says that when a
-final blame label appears, it really did come from a specific compiled
-boundary, with the right party (provider versus context) held responsible.
-_Unique Blame Origins_ says that the label is enough information to
-identify the boundary unambiguously. Together these three theorems cash
-out the promise that diagnostic information is attached at compile time
-and remains recoverable at the end of execution.
+== Gradual source language
 
-The second group answers a different question: is the discipline
-well-behaved as a development workflow? The _Static Gradual Guarantee_
-says that elaboration respects type precision — making source annotations
-less precise produces a less precise (but otherwise structurally similar)
-compiled program, so the compiler does not panic when annotations are
-weakened. The _Dynamic Gradual Guarantee_ says that execution respects
-precision too: weakening an annotation toward `any` cannot turn a
-previously successful run into a failing one. This is the formal
-justification for treating `any` as a safe gradual retreat. A developer
-who removes a precise annotation gives up some static checking, but they
-are not introducing new ways for the program to fail. The reverse
-direction is not symmetric — *adding* a precise annotation may introduce
-new blame, because the tightened annotation can disagree with the values
-that actually flow through it — and that asymmetry is itself part of the
-intended contract: precision is added on purpose, blame for an incorrect
-addition is the diagnostic.
+The source type language `GTy` adds `any` to the static type forms.
+`any` represents unknown type information. Object is a known type containing
+every value; `any` permits runtime checks to establish more specific facts.
 
-The four subsections that follow instantiate this strategy. Source typing
-decides which operations are statically certain and which require
-deferral. Elaboration places the boundaries. The checked runtime executes
-them and turns failures into blame. The metatheory then proves the
-theorems above.
+Erasure of gradual method annotations and bodies preserves the class names and
+ordered parents. `WellFormedGClassTableCore` supplies a validated hierarchy for
+this erased table. Gradual bounds comparisons therefore use the static subtype
+equations without requiring static typing of the gradual method bodies.
 
-== Translation Pipeline
+=== Bounds for unknown information
 
-The gradual development is not a separate runtime. It is a translation
-discipline on top of the static FwPython runtime. A gradual program goes
-through four stages.
+To *materialize* an annotation is to replace each occurrence of `any` with a
+static type, independently of the other occurrences. The checker approximates
+these replacements with a lower bound L(G) and an upper bound U(G) in the static
+subtype order. Class types, class exclusions, and bottom remain unchanged.
+Union and intersection apply the bounds to their components. The other cases are:
 
-The first stage assigns a deterministic source type to each binding. This is
-done by `GSrcInfer`, the gradual source typing judgment. The second stage,
-`compileCheck`, takes a source typing derivation and an explicit expected
-target type, and emits a checked term in which every dynamic obligation is
-exposed as syntax: an `enforce` node, a dynamic attribute access, or an
-explicit call boundary. The third stage runs that checked term on a
-continuation machine designed for it; this machine carries explicit blame
-labels and performs explicit boundary checks. The fourth stage proves the
-whole pipeline correct: end-to-end soundness, blame provenance, and the
-gradual guarantees.
+```text
+L(any) = bottom                    U(any) = Object
+L(P → R) = U(P) → L(R)            U(P → R) = L(P) → U(R)
+```
 
-Splitting the work into stages avoids a familiar trap. A direct metatheory
-for a gradually typed surface language has to mix source typing, implicit
-dynamic checks, blame assignment, and higher-order mediation in a single
-operational model. By pushing all dynamic obligations into explicit syntax in
-the checked target, FwPython can prove safety of a much smaller machine whose
-control state always says exactly which boundary is being checked and which
-labels would be blamed if it failed.
+Function inputs exchange lower and upper bounds because input subtyping is
+contravariant. For example, `any → Bool` has lower bound `Object → Bool`
+and upper bound `bottom → Bool`. For valid annotations, `lowerBound_le_upperBound`
+proves L(G) <: U(G). The relation `MaterializesTo G T` is defined by interval membership:
 
-== Gradual Source Language
+```text
+L(G) <: T <: U(G)
+```
 
-The source language is what the programmer writes. Its type language `GTy`
-extends the static type language with a dynamic type:
+This interval can include types that independent replacements do not produce.
+For example, `Bool → Object` lies between the bounds of `any → Bool`, although
+replacing its unknown input always retains a Bool result. The bounds thus support
+type comparisons, while result selection also retains the source annotations.
 
-- class types and callable types,
-- the dynamic type `any`,
-- unions, intersections, and class-only negation `negClass(C)`,
-- `bottom`.
+=== Function calls with unknown annotations
 
-Method annotations are stored directly as `GTy`. The checked metatheory turns
-them into explicit normalized checked targets only when they cross the
-source/runtime boundary, through `checkedTargetOfRuntimePublicTy`. The old raw
-helper `runtimePublicTy` survives only as the identity on `GTy` for
-compatibility statements such as the end-to-end soundness theorem.
+Static function typing requires calls to accept the required inputs without failure
+and give every returned result the required type. Gradual annotations retain those
+requirements while permitting `any`. The compiler inserts runtime checks: a function
+check verifies bound-method shape, while checks at the call enforce input and result
+requirements. A failed check can report blame. An intersection places several
+requirements on the same function.
 
-Source typing is expressed by `GSrcInfer`. It is deterministic, gives one
-type per binding, and is deliberately confined to source-level information.
-Two relations capture the source-level compatibility checks:
+For a callee annotation G and argument annotation A on a fixed valid hierarchy,
+`callSourceTy?_accepts_iff` characterizes source call acceptance exactly:
 
-- `GradualSubtype` for one-way widening, and
-- `AssignableTo` for assignment-like compatibility — the relation used at
-  call sites and conditional branches.
+```text
+callSourceTy?(G, A) is defined  iff  L(G) <: (L(A) → Object)
+```
 
-The single-type discipline is intentional. Source typing is supposed to
-explain what the programmer wrote and which source-level choices were made;
-it is not supposed to precompute every checked approximation the runtime
-might need. Checked approximations such as call-site target types and
-boundary contracts are chosen later, where they are needed, by
-`compileCheck`. If they were threaded through source environments instead,
-every source theorem would have to talk about machine-facing artifacts
-everywhere, even at sites where no boundary is involved.
+Object leaves the result unrestricted during acceptance. Calling a
+`Bool → Bool` function with `any` passes because L(any) is bottom; runtime
+checking then decides whether the actual argument is Bool. The comparison uses
+the full callee type. Thus, `Bool | (Bool → Bool)` called on Bool is rejected:
+the callee could be a noncallable Bool value.
 
-The role of `any` in this layer is to be the gradual escape hatch. Where
-the source program permits dynamic behavior — for example, accessing an
-attribute on a value of type `any` — the source typing judgment admits the
-operation and records that a runtime check will be needed. The exact
-checked obligation is not chosen until elaboration.
+Source typing permits calls that need runtime checks, so acceptance does not
+mean every materialization works. The compiler checks the actual function,
+argument, and result and reports blame if a check fails. The inferred result
+still needs to retain useful information, because it determines which later
+calls pass source typing. Consider:
 
-The source summaries for attributes and calls are intentionally asymmetric.
-Attribute lookup on a union succeeds if either branch provides the attribute
-and unions the successful results. Attribute lookup on an intersection keeps
-the unique successful branch if only one side provides the attribute and
-returns an intersection only when both sides succeed. Calls behave dually:
-calling a union succeeds only when both branches accept the argument, while
-calling an intersection keeps a unique successful branch and collapses two
-simultaneous successes to `any`.
+```text
+f: (Object -> Bool | NoneType) & (Bool -> NoneType)
+x: any
+consume: NoneType -> Bool
+```
 
-That asymmetry carries into elaboration through the call-parameter target
-helpers. `callParamTarget` and its checked-target image absorb `any`,
-propagate `bottom`, remove duplicate intersections, and canonicalize the
-order of the remaining branches. The checked/runtime proofs therefore compare
-a stable concrete target tree rather than one that still remembers
-source-level intersection ordering noise.
+Materializing x as Bool or NoneType gives different results:
 
-== Checked Target and Elaboration
-
-The checked target layer uses an explicit machine-facing target syntax
-`CheckedTarget` rather than reusing raw `GTy` annotations directly. Its core
-operations are interpretation back to `GTy`, compilation to boundary
-contracts, and the normalizer `coreNormalizeCheckedTarget`. Runtime-facing
-checked targets are compared at this explicit syntax level, and checked
-syntax stores boundary labels with direct indices
-`BoundaryLabels (compileBoundaryTarget T)`.
-
-There is no checked-target analogue of `runtimePublicTy`. Raw source
-expectations enter the checked layer through `checkedTargetOfRuntimePublicTy`,
-and the root-only structural premise at the public GG boundary is
-`ProgramRootTargetInputPrecision` on those explicit checked-target images.
-
-On top of that target syntax, the checked expression language extends the
-static expression language with three forms that make dynamic obligations
-syntactically explicit. The `enforce e target labels` form runs `e`, then
-checks the resulting value against the compiled contract image of `target`,
-blaming the indicated label tree on failure. The `dynAttrAccess e attrName ℓ`
-form looks up an attribute on a value whose static type only guaranteed
-`any`, blaming the label `ℓ` if the attribute is missing. The
-`call callee arg paramTy returnTy returnLabels` form is the explicit call: it
-stores the caller-side parameter and return checked targets, plus the label
-tree that will own any return-side blame.
-
-`compileCheck` produces these forms from a source typing derivation and an
-explicit expected target. The expected target is what makes elaboration
-target-relative: the same source expression compiles to different checked
-terms depending on what the surrounding context expects.
-
-The presence of `any` in the source forces dynamic uncertainty into the
-runtime, but the design refuses to let that uncertainty become unchecked
-machine failure. Wherever the source typing would otherwise rely on dynamic
-behavior, elaboration emits a checked form whose failure mode is blame at a
-specific label. The intent is that a well-typed elaborated program ends in
-exactly two ways: it succeeds with a value witnessing the expected type, or
-it blames at one of the boundaries the elaborator inserted. The checked
-machine has a `runtimeError` case for engineering convenience, but the
-soundness theorem rules it out for compiled well-typed runs.
-
-#theorem(
-  "Theorem",
-  "Elaboration Typing",
-  [`compileCheck_checked` proves that elaborating a `GSrcInfer` derivation
-   against an expected target `P` yields a checked term typed at `P`, given an
-   explicit checked typing environment together with
-   `RuntimePublicAnnotation gct P` and `WellFormedGTy gct P`. The graph
-   `ElabCheck` records that a checked expression/counter pair is the output of
-   `compileCheck`; `compileCheck_elaborates` is its canonical witness and
-   `elabCheck_checked` delivers checked typing from any such witness.],
-  proof: [The proof is by induction on the source typing derivation. Each case
-    compiles its subterms against the targets dictated by the elaboration
-    scheme, then discharges the checked typing obligations with the local
-    admissibility and well-formedness facts stored on the source derivation.],
+#table(
+  columns: (1fr, 2fr, 1fr),
+  inset: 6pt,
+  stroke: luma(80%),
+  [Argument materialization], [Requirements that apply], [Type of `f(x)`],
+  [`Bool`], [Both.], [`NoneType`],
+  [`NoneType`], [The Object requirement.], [`Bool | NoneType`],
 )
 
-== Checked Runtime and Enforcement
+With x typed as `any`, both argument materializations are possible, so the
+checker retains both results. The Bool materialization gives the NoneType
+required by `consume(f(x))`, letting that expression pass source typing.
+If f actually returns Bool, consume's runtime input check rejects it.
 
-The checked runtime is a small-step continuation machine that runs over an
-explicit heap. Its values are only object references — `CheckedValue.objRef
-oid` — and its heap objects come in just two kinds: ordinary objects and
-bound-method objects, where the latter carry a receiver OID and a checked
-method.
+=== Representing alternative result types
 
-Every callable value at runtime is therefore a bound-method heap object.
-Both ordinary attribute lookup and dynamic attribute lookup allocate a fresh
-bound-method object and return its reference. The same representation also
-underpins callable witnesses and the call rules. This uniformity is what
-allows the metatheory to reason about every callable interaction with the
-same shape facts.
+Different argument materializations can select different result types.
+Suppose two cases select static results X and Y. An exact representation of
+these choices need not be a single subtype interval. Every interval containing
+both X and Y also contains their intersection and union, and all types between
+those endpoints. The greatest common lower bound is `X & Y`; the least common
+upper bound is `X | Y`. The checker represents these bounds with:
 
-Boundary enforcement is expressed by `EnforceValue` over compiled
-`BoundaryContract`s, not directly over `GTy`. Three properties of
-enforcement matter for the proofs.
+```text
+(X & Y) | (any & (X | Y))
+```
 
-First, enforcement is heap-read-only. It performs no allocation and no
-mutation. Second, callable enforcement is shallow: it asks only whether the
-object reference points to a bound-method object. Higher-order obligations
-about the callee's parameter and return contracts are not discharged here.
-Third, when enforcement succeeds, it returns the same object reference it
-was handed. Class checks, callable checks, negated-class checks, and the
-unions and intersections built from them all preserve runtime value shape on
-success.
+Its lower bound is `X & Y` and its upper bound is `X | Y`, so it gives the
+tightest interval containing both case results. It can still admit extra types:
+an interval containing Bool and Object also contains `Bool | NoneType`.
+This loss of precision is the cost of the bounds approximation. When all cases
+select the same result, the checker retains that annotation without adding `any`.
 
-Shallow callable enforcement is a deliberate choice. The natural
-alternative — wrapping callable values to mediate higher-order contracts —
-would manufacture new heap objects whose shape differs from the underlying
-callee. That would complicate the dynamic gradual guarantee, which compares
-two precision-related runs and needs the simulation to stay structural.
-Keeping the callable check shallow leaves the higher-order obligations to
-the explicit checked call syntax, where they can be discharged by the call
-mechanism itself.
+=== Selecting the result of a call
 
-Calls are mediated by the checked call form and its supporting continuation
-frames. Once evaluation reaches a bound-method callee, the machine performs
-a fixed dance: evaluate the argument, enforce the method's stored parameter
-contract, run the body in the `[param, receiver]` environment, enforce the
-method's stored return contract, and finally enforce the caller's return
-expectation using the call-site labels. The callee's own contract and the
-caller's use-site expectation are two distinct checks, and they are both
-explicit in the checked machine.
+After acceptance, the checker selects a result from the callee's function
+requirements. A declared `P → R` supplies its input and result pair, while an
+unknown callee part supplies `any → any`. Class membership and exclusion can
+rule out callable values according to BoundMethod's MRO; they supply no input
+or result annotations. The earlier acceptance test accounts for noncallable values.
 
-== Safe States, Labels, and Constructiveness
+For an intersection, the candidate requirements include its individual function
+requirements and their combinations. Requirements that cover different inputs
+can combine their inputs and results by union. Requirements whose input has
+empty overlap with U(A) contribute no reachable case. For a union of callees,
+each candidate combines requirements from both alternatives: inputs intersect,
+while results union. The input must work for either callee, and either result
+can occur.
 
-The central machine invariant is `CheckedStateSafe`. A safe state packages
-the well-formedness of the checked heap, the well-formedness of the gradual
-class table, the alignment of the gradual and checked class tables, the
-typing of the runtime environment, the typing of the control component, and
-the typing of the continuation. All six conditions hold simultaneously, and
-preservation shows they continue to hold across each step.
+Each candidate `P → R` defines a case when L(A) <: U(P). For that case, let
+T = U(A) & U(P). The checker retains R and the result S of every other candidate
+`Q → S` for which T <: L(Q). Those requirements apply to the same case input,
+so their results are intersected. The results from distinct cases are then
+combined with the interval construction above. In the preceding example,
+the Bool case gives NoneType and the Object case gives `Bool | NoneType`.
+Their combined bounds permit the later NoneType input check.
 
-Inside the progress and preservation proofs, the value-level invariant is
-`CheckedValueWitness`. A witness records why a runtime value inhabits a
-gradual type, with structure that mirrors the type itself: an `any` witness
-records the value is a reachable object reference; a `class_` witness
-records that the runtime MRO contains the class; a `callable` witness
-records that the object is a reachable bound method whose receiver MRO
-covers the callee class; and so on. Crucially, these witnesses are exact
-rather than coarse — they record the same shape facts the operational rules
-inspect, not a derived approximation.
+Equal result annotations remain unchanged. Bounds comparisons can also remove
+redundant results, but only when the annotations contain no unknown function
+inputs. The restriction matters for calls on returned functions. Consider:
 
-Labels are part of the semantics, not anonymous debugging tokens. A label
-records three things: the scope in which it was allocated, a site number,
-and an owner. Ownership is determined by the polarity of the boundary it
-guards. Positive boundaries blame the provider — the program that produced
-the value. Negative boundaries blame the context — the program that
-expected it. Recording ownership at compile time makes blame correctness
-provable: a final blame label is enough information to identify both the
-boundary and the party responsible for the failure.
+```text
+f: (Bool → (any → Bool)) & (NoneType → (Bool → Object))
+x: any
+```
 
-The provenance layer packages the theorem-level origin through
-`BoundaryOrigin` and `CompiledBoundaryOrigin`, while the dependent target and
-label casts live in `BoundaryCast`. Cross-program blame comparison therefore
-uses origin equivalence rather than literal equality of raw numeric
-`Label.site` payloads.
+A Bool argument selects `any → Bool`; a NoneType argument selects
+`Bool → Object`. Bounds alone would treat the first interval as covering the
+second and discard the Object-result alternative. Yet replacing the unknown
+input in `any → Bool` always retains Bool as its result. The selector therefore
+keeps both distinct function annotations before combining their uncertainty.
+The combined interval can still lose information; exact result selection for
+all independent replacements is not proved.
 
-The front end is constructive end to end. The MRO search `computeGMro?` is
-an executable, fuel-bounded function, sound and complete with respect to
-the inductive `GComputeMro` relation. Method-type lookup is built directly
-on top of it. The well-formedness facts stored on each source derivation
-supply the local decidability instances needed for the more complex
-elaboration choices, including assignability, admissible targets, and
-branch refinement. With those instances in scope, `compileCheck` is a
-plain `def` rather than a classical existence proof. This matters because
-the precision theorems compare concrete compiled outputs: if elaboration
-were merely shown to exist, the theorems could only relate abstract
-witnesses rather than the actual programs the compiler produces.
+An annotation that excludes callable values contributes no successful call result.
+A bottom callee gives bottom because no value can reach the call.
+If acceptance succeeds but no result is selected, the fallback is bottom when
+U(A) is empty and `any` otherwise. This distinguishes unreachable calls from
+calls whose result is unknown.
 
-== Gradual Soundness
+=== Declared results and unknown function constraints
 
-The first group of end-to-end theorems formalizes localized soundness for
-the gradual layer: an elaborated program cannot fail in any way except by
-reaching a boundary the elaborator inserted. Two theorems carry the
-result. The first shows that elaboration produces a state that is safe to
-start executing, and the second lifts that safety across the whole run.
+A single `P -> R` keeps its declared result R on an accepted call. Thus,
+`Bool -> Bool` with an `any` argument gives Bool, as does `any -> Bool` with
+True: uncertainty about an input alone does not change the declared result.
+The result associated with each materialization is the one selected by this
+call rule. Static expression typing can assign additional types to
+unreachable calls, such as those with a bottom argument.
 
-#theorem(
-  "Theorem",
-  "Initial Safety of Elaborated Programs",
-  [`compiled_initial_safe_at` and
-   `compiled_initial_safe_from_elaboration_at` show that the initial checked
-   state produced by elaboration is safe at `runtimePublicTy(P)`, equivalently
-   at the interpretation of the recorded root checked target image.],
-  proof: [`compileCheck_elaborates` produces the `ElabCheck` graph witness and
-    `elabCheck_checked` delivers the typed control component. The
-    initial-heap well-formedness lemma supplies the heap invariant, the empty
-    runtime environment is trivially typed, and the record produced by
-    elaboration packages the class-table alignment and runtime-public target
-    admissibility facts needed to assemble one `CheckedStateSafe` state.],
+An unknown part of the whole function can restrict the result as well. In
+`any & (Dog -> Dog)`, it can materialize to `Dog -> (Dog & Cat)`, so the
+result must allow a more specific type than Dog. The checker gives bounds
+from bottom to Dog, letting a later Cat parameter check pass source typing;
+the runtime check fails if the actual Dog is not a Cat. These rules balance
+retained information with runtime checks, but the development does not prove
+that changing annotations to `any` preserves acceptance of a whole program.
+
+=== Attribute lookup and class tests
+
+Attribute lookup on `any` returns `any` and requires a runtime lookup check.
+For `A | B`, source lookup must succeed on both alternatives, because the
+receiver can have either type. The result is the union of their method types.
+For `A & B`, one successful lookup suffices because both receiver requirements
+hold. If both succeed, the result intersects their method types.
+
+The test `isInstance(x, C)` adds class information to the type of `x` in each branch.
+The checker keeps known class requirements before adding the test result.
+`any` and `A | any` use `class C` in the positive branch and `negClass(C)` in the negative branch.
+`A & any` uses `A & class C` and `A & negClass(C)`.
+This rule does not inspect input and result annotations inside a function type.
+
+== Compiled expressions <checked-targets>
+
+Source annotations and runtime check types have different roles. Source types
+can intersect several function requirements. Runtime checks use the restricted
+fragment `CheckedTargetTy`, which lets preservation use the evidence produced
+by enforcement. Let F be a class formula and T a permitted target:
+
+```text
+F ::= any | class C | negClass(C) | bottom
+    | union(F, F) | intersection(F, F)
+T ::= F | (T → T) | union(T, T)
+    | intersection(T → T, F) | intersection(F, T → T)
+```
+
+Here, `union` and `intersection` denote the type operations `|` and `&`.
+In the final two forms, F must hold for every computed BoundMethod MRO.
+Class membership checks inclusion, exclusion checks absence, union permits
+either formula, and intersection requires both. This side condition makes F
+compatible with every callable value. Target class names must also be declared.
+A direct intersection of two function signatures is excluded, while function
+types can occur recursively in another function's input or result.
+
+`CheckedTarget` stores a type that runtime checks can use.
+`interpTarget` gives its gradual type meaning.
+`compileBoundaryTarget` converts it to `BoundaryContract`, the structure used by the runtime type check.
+`checkedTargetOfGTy` gives the checked syntax for an expected gradual type.
+
+The compiler emits these expression forms:
+
+#table(
+  columns: (1.4fr, 2fr),
+  inset: 5pt,
+  [*Form*], [*Meaning*],
+  [`enforce e target obligation`],
+  [Evaluate `e`. Check its value against `target`. Report `obligation` if the check fails.],
+  [`dynAttrAccess e attrName obligation`],
+  [Evaluate `e`. Look up `attrName`. Report `obligation` if the attribute is absent.],
+  [`call callee arg paramTy returnTy returnObligation`],
+  [Call `callee` with `arg`. Store the caller's input and result targets. Report `returnObligation` if the returned value fails the caller's result check.],
 )
 
+An *obligation* is a source location and the requirement checked there.
+`SourceExpressionSite` identifies an expression by a path from its root.
+`SourceSite` also identifies method parameter and method result checks.
+`SourceObligation.hasType site G` requires the value at `site` to satisfy type G.
+`SourceObligation.hasAttribute site attr` requires lookup at `site` to find `attr`.
+
+`compileCheck` takes a source typing proof, a source expression location, and an expected type P.
+It returns the compiled expression.
+The surrounding expression can require a different P at each use.
+
 #theorem(
   "Theorem",
-  "Gradual Soundness",
-  [`gradual_soundness_at` states that an elaborated well-typed gradual
-   program either finishes with a value witnessing `runtimePublicTy(P)` or
-   raises blame. It excludes raw `runtimeError` for compiled well-typed runs.],
-  proof: [Initial safety comes from elaboration, preservation lifts safety
-    across every checked step, progress rules out getting stuck in a safe
-    non-final state, and final-state inversion shows that the only possible
-    checked results are a success carrying a `CheckedValueWitness` or blame.],
+  "Compiler Typing",
+  [`compileCheck_checked` proves that the compiled expression has its expected type P.
+   It requires a valid source typing proof and matching source and checked environments.
+   It also requires a source location and proofs that P is a permitted target with valid class names.],
+  proof: [The proof follows the source typing proof.
+    Each case compiles the smaller expressions and applies the corresponding checked typing rule.],
 )
 
-== Blame Provenance
+== Runtime type checks and calls
 
-Soundness rules out unchecked failure, but it says nothing about how a
-final blame relates to the source program that produced it. The
-blame-provenance theorems answer that question. Together they show that
-every final blame label can be traced back to one specific boundary in
-the compiled program, with the right owner attached.
+`CheckedValue.objRef oid` refers to the heap object with identifier `oid`.
+The heap stores ordinary objects and bound-method objects.
+A bound-method object contains a receiver reference and a checked method.
+Only bound methods can be called.
+Successful method attribute lookup allocates a bound-method object and returns its reference.
+
+`EnforceValue` checks a value against a `BoundaryContract`.
+The check reads the heap without allocating objects or changing it.
+A successful check returns the same object reference.
+A function check only verifies that the reference points to a bound-method object.
+It does not execute the body or test possible inputs.
+
+For a source call with expected result type P, the compiler performs these steps:
+
++ Compute `D := callParamTarget argSrcTy` from the argument's source type.
++ Compile the function expression with expected type `D → P`.
++ Compile the argument with expected type D.
++ Emit a checked call with the input target, result target, and source result obligation.
+
+`callParamTarget` retains the argument annotation's class information and
+replaces each function part with `any`, then simplifies unions and intersections.
+This produces a permitted class-formula target. The compiled argument
+establishes this caller requirement before the machine applies the method's
+stored parameter check. Function input and result requirements are enforced
+when those functions are called.
+
+After the function expression gives a bound method, the machine performs these steps:
+
++ Evaluate the argument.
++ Check its value against the method's stored parameter target.
+  Report the method parameter obligation if the check fails.
++ Run the compiled body with variable bindings `[param, receiver]`.
+  The body was compiled with expected type `any`.
++ Check the body's result against the method's stored result target.
+  Report the method result obligation if the check fails.
++ Check the result against the caller's expected result target.
+  Report the call result obligation if the check fails.
++ Restore the caller's environment.
+
+The method's declared result type and the caller's expected result type can differ.
+The machine checks both.
+
+== Machine and value invariants
+
+An *invariant* is a property that each execution step preserves.
+`CheckedStateSafe` requires these properties:
+
+- The heap objects have valid classes and payloads.
+- The gradual class table satisfies its typing and inheritance rules.
+- The checked class table matches its source table.
+- The variable values satisfy their assigned types.
+- The current expression or result has the required type.
+- The continuation accepts that type and gives the required final type.
+
+The continuation is a stack of pending operations.
+Each frame stores the information needed to complete one operation.
+For example, `awaitArgument` waits for a call argument.
+It retains the call's result target and failure obligation.
+
+`CheckedValueWitness` stores a type validity proof and the data that explains why a value satisfies that type.
+For `any`, it records a reference to a valid heap object.
+For `class_ C`, it records that the object's runtime MRO contains C.
+For a function type, it records a bound method from its receiver's MRO.
+Input and result checks occur when the machine performs the call.
+Union records at least one member type; intersection records both.
+
+The compiler and its helpers compute without classical choice.
+`computeGMro?` searches for the MRO with a finite fuel limit.
+Its result agrees with the relation `GComputeMro`.
+`lookupMethodTy?` searches this MRO for the method's input and result types.
+Call acceptance supplies the type validity needed to build runtime checks.
+
+== Gradual type safety
+
+`ElaboratesProgramAt` connects a source program to its compiled program at expected result type P.
+It records the class-table correspondence and the source typing proof.
+It also records that the compiled main expression equals `compileCheck` at the main source location.
+P must be a permitted runtime check type with valid class names.
 
 #theorem(
   "Theorem",
-  "Blame Correctness",
-  [`gradual_blame_correctness_at` shows that a final blame arises from a
-   compiled boundary and that the boundary's expected owner matches the owner
-   stored on the final blame label.],
-  proof: [The provenance theorem first shows that every final blame label is a
-    registered compiled label. Correctness then recovers the originating
-    boundary from that label and appeals to the polarity-based owner
-    calculation used during label construction.],
+  "Initial State",
+  [`compiled_initial_safe_at` proves that the compiled initial state satisfies `CheckedStateSafe`.
+   `compiled_initial_safe_from_elaboration_at` obtains the required data from `ElaboratesProgramAt`.],
+  proof: [`compileCheck_checked` supplies the expression type.
+    The initial heap satisfies its storage rules.
+    The translation record supplies class-table correspondence and valid target types.],
 )
 
 #theorem(
   "Theorem",
-  "Unique Blame Origins",
-  [`gradual_blame_provenance_origin_unique_at` shows that one final blame label
-   determines one unique compiled origin.],
-  proof: [Compilation assigns disjoint, scope-indexed label ranges to all
-    boundary sites, and the provenance layer proves that the label-to-origin
-    map is injective on registered labels. Two origin witnesses for the same
-    final label therefore collapse to the same origin.],
+  "Gradual Type Safety",
+  [`gradual_soundness_at` takes an `ElaboratesProgramAt` record and an execution that reaches a final state.
+   It proves that the final result is a value that satisfies P or blame.
+   It excludes `runtimeError` for that execution.],
+  proof: [The initial state satisfies `CheckedStateSafe`.
+    Preservation proves that each step keeps this invariant.
+    Progress proves that a valid unfinished state can take a step.
+    The final state can contain only a successful value or a blame report.],
 )
 
-== Precision and the Gradual Guarantees
+`Checked.blame_adequacy` proves that a final blame report describes a violated requirement in the final heap.
+A failed type check violates the reported type requirement.
+A missing attribute violates the requirement to find that attribute.
 
-The third group of theorems compares behavior across precision. The final
-development uses three different layers, each for a different purpose.
+`embedded_static_no_blame` requires an `EmbeddedStaticElaboration` record for a static program.
+It proves that the compiled execution cannot finish with blame.
+`embedded_static_success` proves that any final result is a successful value.
+The record requires permitted runtime targets for translated method input and
+result annotations, as defined in @checked-targets. Thus, a method annotation
+that directly intersects two function signatures is outside its scope.
+It also supplies translation proofs for the main expression and each method body.
+For example, a class C with method `m(self, x: Bool) → Bool = x` has the required
+evidence. Its compiled main expression `(new C).m(TRUE)` terminates with TRUE.
+The development does not construct this evidence for every statically typed program.
 
-At the source/annotation level, the semantic relation is `MoreStatic`.
-Program-wide source comparison is expressed by `ProgramAnnotationPrecision`,
-and source environments use the same-binding relation
-`SemanticSourceEnvPrecision`. These theorems do not depend on literal
-equality of compiled outputs.
+== Comparing runtime check types
 
-At the checked/runtime level, structure is carried by explicit checked
-targets. Two structural relations are used here. `CheckedTargetPrecision` is
-constructor-directed on normalized `CheckedTarget`s and handles stored
-checked annotations. `CompileTargetPrecision` is the slightly larger
-compile-side relation used for generated payloads such as normalized
-call-parameter targets. Together they lift to checked syntax, checked
-programs, checked states, and final outcomes without quotienting checked
-syntax by semantic target equivalence.
+`CheckedTargetPrecision` compares targets by their syntax. `CompileTargetPrecision`
+also permits changes made by compiler simplification. The no-blame proof uses these
+relations to widen runtime satisfaction facts. They do not state a theorem comparing
+whole program executions with different annotations.
 
-At the public static/DGG entry point, the surviving structural premises are
-narrower:
+= Limits of the development
 
-- `ProgramTargetPrecision` fixes the same source skeleton while comparing
-  method annotations through their explicit checked-target images;
-- `ProgramRootTargetInputPrecision` is the separate root-only premise on the
-  top-level expected target;
-- `ElaboratedStatePrecision` is the DGG-only wrapper that extends checked
-  state precision with elaboration and provenance alignment.
+The type language permits class exclusion with `negClass C`.
+It does not contain general negation of function types, unions, or intersections.
 
-Outcome precision lifts the checked/runtime relation to final results.
-Given two final results from related runs, `CheckedOutcomePrecision`
-permits exactly three combinations:
+The future-hierarchy construction supplies class ancestry and MROs. Call safety
+comes from the program's typed method declarations. There is no separate theorem
+relating all the function equations to arbitrary method executions.
 
-- both runs succeed, with heaps and values that are themselves
-  precision-related;
-- the more precise run blames, while the less precise run succeeds;
-- both runs blame.
+Exhaustive enumeration makes the correctness proofs simple, but evaluation can
+exhaust time or memory. Repeated calls on returned functions can make this
+especially costly: each call enumerates subsets and collections of the
+function requirements in the preceding result.
 
-The combination that is *not* permitted is the substantive content of the
-theorem: a more precise run cannot succeed while a less precise run blames.
-Equivalently, weakening an annotation toward `any` cannot turn a previously
-successful run into a failing one. The intuition is that a more precise
-type imposes tighter contracts at boundaries, so it can blame in places
-where a looser type lets the value through; loosening cannot introduce
-new failures that the tighter contracts did not already catch. This is the
-monotonicity property that justifies treating `any` as a safe gradual
-retreat. The reverse direction is not symmetric: *adding* precision can
-introduce new blame, because the new annotation may disagree with the
-values that actually flow through it.
+A function check verifies the bound-method storage shape. The machine checks input
+and result types at calls. Gradual call acceptance compares the full callee
+annotation's materialization lower bound with a function type. This uses the subtype comparison
+proved equivalent to the type equations. Result selection uses the function
+requirements extracted from its source type. It does not use every consequence of the
+full type to narrow the result.
 
-#theorem(
-  "Theorem",
-  "Static and Dynamic Gradual Guarantees",
-  [`static_gradual_guarantee` consumes `ProgramTargetPrecision`, a separate
-   `ProgramRootTargetInputPrecision`, and two elaboration witnesses, and
-   returns `CheckedProgramPrecision`; the companion corollary
-   `static_gradual_guarantee_main_moreStatic` packages the surviving source
-   `MoreStatic` fact for the main expression. `dynamic_gradual_guarantee`
-   starts from the corresponding initial `ElaboratedStatePrecision` package
-   and compares terminating executions with `CheckedOutcomePrecision`.],
-  proof: [The static guarantee is a compilation theorem: it relates two
-    same-skeleton source derivations and shows that their elaborated checked
-    programs are related after erasing only the label payloads. The dynamic
-    guarantee starts from those aligned initial elaborations and proves a
-    simulation over `ElaboratedStatePrecision`. Its key enabling fact is that
-    successful enforcement preserves runtime value shape, so the simulation is
-    not derailed by wrapper allocation or other boundary-induced value
-    transformations.],
-)
+`callSourceTy?_moreStatic` preserves acceptance of one call when each new bounds interval includes the old interval.
+It does not compare the selected results or later parameter checks.
+There is no theorem that changing annotations to `any` preserves acceptance of a whole program.
 
-The proof of the dynamic guarantee is structural. There is no appeal to a
-back-translation, an erasure, or any external simulation argument. The
-relation between the two runs is explicit at every step, and the simulation
-is local because successful enforcement preserves runtime value shape.
+The soundness theorems apply to correctly typed compiled programs.
+The checked machine also contains `runtimeError` rules for other inputs.
+The theorems do not cover malformed inputs that bypass compilation.
 
-= Limits and Design Boundaries
-
-The recurring discipline of FwPython is that nothing enters the type
-language unless the runtime can witness it. That discipline keeps the
-development small, but it also excludes things other formalizations might
-attempt. The most consequential omissions are worth naming explicitly so
-the report does not overstate what is proved.
-
-On the static side, the negative fragment stops at class exclusion. There
-is no general semantic complement, no primitive negation over callable
-types, and no negation over unions or intersections. The runtime can
-witness that an object's runtime-class MRO excludes a particular class
-name, and that is the only negative fact the type language admits. A
-generic complement would justify reasoning the runtime cannot back up —
-asserting that a value is "not callable" without committing to a specific
-nominal class, for example — and that justification gap is exactly what
-the design refuses to cross. The same reasoning explains why primitive
-class exclusion is restricted to the three sealed built-ins: only those
-classes are guaranteed not to acquire new descendants in any extension of
-the table, so global exclusion against them remains safe in an open world.
-
-Decidability of subtyping is conditional, not unconditional. The decision
-procedures require the class table and both type operands to be
-well-formed; ill-formed inputs are out of scope. And the static language
-has no parametric polymorphism, no recursive types, and no first-class
-mutable fields. Each of these would require new runtime evidence to
-support a corresponding piece of static vocabulary.
-
-On the gradual side, callable enforcement is shallow. A successful
-callable check guarantees only that the value is a bound-method object
-reference; it does not attach a wrapper or set up a longer-running
-monitor. Higher-order obligations are discharged at the explicit checked
-call form, not at the value itself. Wrapping callables would let FwPython
-enforce richer interaction contracts across multiple call sites, but it
-would also break the shape-preservation property that the dynamic gradual
-guarantee depends on. The current design picks the guarantee.
-
-The dynamic gradual guarantee is the binary outcome-precision form. It
-relates the final results of two precision-related runs and nothing more.
-There is no back-translation, no graduality reduction, and no equivalence
-between executions at different precisions. Those stronger statements are
-not theorems of this development.
-
-The checked machine retains a `runtimeError` constructor for engineering
-convenience. The soundness theorem rules it out for compiled well-typed
-runs, but the constructor is still reachable from other transitions —
-malformed inputs that bypass elaboration, for instance — and the
-metatheory makes no promises about those runs. Concurrency, exceptions
-other than blame, and side effects more broadly are outside the
-formalization entirely.
-
-What holding the boundary strictly buys is that every piece of vocabulary
-in the static or gradual type language reduces to a fact about one
-runtime model. The proofs do not have to mediate between competing
-abstractions. Many properties that other gradually typed languages prove
-are out of scope here, but everything FwPython does prove runs through one
-continuation machine and one shape of value.
+The language has no parametric polymorphism, recursive types, or mutable fields.
+It has no concurrency or exceptions other than blame.

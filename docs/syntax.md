@@ -1,160 +1,104 @@
-# FwPython Syntax
+# FwPython syntax
 
-This document describes the surface language defined in
-`FwPython/Static/Ast.lean` and `FwPython/Static/ClassTable.lean`. FwPython is intentionally small. A program is just a
-class table together with one main expression, and evaluation is expression
-oriented from end to end.
+This reference describes the static language defined by
+[Ast.lean](../FwPython/Static/Ast.lean) and
+[ClassTable.lean](../FwPython/Static/ClassTable.lean).
+A program contains class declarations and one main expression.
+Method bodies are also expressions.
 
-The language is designed to isolate a specific cluster of issues:
+The notation below explains the Lean syntax constructors. It is not a separate
+text parser. Type annotations are described in the
+[static type system](type_system.md#types-and-their-meaning).
 
-- nominal classes with multiple inheritance
-- runtime method lookup through an MRO
-- first-class method values
-- conditionals with branch-sensitive `isInstance` tests
+## Names and declarations
 
-It does not try to model a full Python-like object system. There are no
-statements, no mutable fields, no constructors, and no descriptor machinery.
+Names are strings. Variables, classes, and methods use the same identifier type.
 
-## Identifiers
+| Program field | Meaning |
+| --- | --- |
+| `classes` | The list of class declarations available to the program. |
+| `main` | The expression evaluated when the program starts. |
 
-Identifiers are strings. The same underlying type is used for:
+The declaration list is called the *class table*. Class lookup selects the
+first declaration with the requested name.
 
-- variable names
-- class names
-- method names
+| Class field | Meaning |
+| --- | --- |
+| `name` | The name that identifies the class in expressions and parent lists. |
+| `baseClasses` | Direct parent names, in the declared inheritance order. |
+| `methods` | Methods defined by this class. Inherited methods are found through the parents. |
 
-The syntax layer does not impose further structure.
+A *method resolution order* (MRO) lists a class and its ancestors in method
+lookup order. C3 computes this list while preserving each parent's MRO and the
+declared parent order. If a class has no explicit parents, it inherits Object.
+Object itself has no parents.
 
-## Programs, Classes, and Methods
+| Method field | Meaning |
+| --- | --- |
+| `name` | The name used by method lookup. |
+| `receiverParam` | The variable bound to the object on which the method runs. |
+| `param` | The variable bound to the method's one explicit argument. |
+| `paramTy` | The declared type of that argument. |
+| `returnTy` | The declared type required of a returned result. |
+| `body` | The expression evaluated with the receiver and argument bound. |
 
-A program has two components:
-
-- a class table
-- a main expression
-
-A class declaration has three components:
-
-- the class name
-- a list of direct base-class names
-- a list of methods
-
-A method declaration has six components:
-
-- the method name
-- the receiver parameter name
-- the ordinary parameter name
-- the parameter type annotation
-- the return type annotation
-- the body expression
-
-Methods are unary: every method takes exactly one explicit argument in addition
-to the receiver. This keeps the core calculus small while still supporting the
-interaction between method lookup, callable values, and variance.
-
-Classes contain methods but no fields. If a class declares no explicit base
-classes, the MRO machinery treats it as implicitly inheriting from `Object`,
-unless the class itself is `Object`.
+Each method takes one explicit argument in addition to its receiver. Classes
+have methods but no fields. Object creation does not run a constructor.
 
 ## Expressions
 
-FwPython has nine expression forms.
-
-| Lean constructor | Surface intuition | Role |
+| Lean constructor | Readable notation | Meaning |
 | --- | --- | --- |
-| `var x` | `x` | Look up variable `x` in the runtime environment. |
-| `new C` | `new C` | Allocate a fresh object of class `C`. No constructor is invoked. |
-| `attrAccess e m` | `e.m` | Resolve method `m` on the runtime class of `e`, allocate a fresh bound-method object, and return it. |
-| `call e1 e2` | `e1(e2)` | Invoke the value of `e1` on argument `e2`. Calls succeed only for objects carrying bound-method payload. |
-| `constNone` | `NONE` | The distinguished none object. |
-| `constTrue` | `TRUE` | The distinguished true object. |
-| `constFalse` | `FALSE` | The distinguished false object. |
-| `cond e1 e2 e3` | `if e1 then e2 else e3` | Evaluate `e1`; on `TRUE` continue with `e2`, on `FALSE` continue with `e3`. |
-| `isInstance x C` | `isInstance(x, C)` | Test whether the runtime class of the value stored in variable `x` lies under class `C`. |
+| `var x` | `x` | Return the value bound to variable `x`. |
+| `new C` | `new C` | Allocate an object of class `C`. |
+| `attrAccess e m` | `e.m` | Find method `m` on the object produced by `e` and return a bound method. |
+| `call f a` | `f(a)` | Evaluate the function, then the argument, then call the bound method. |
+| `constNone` | `NONE` | Return the None singleton. |
+| `constTrue` | `TRUE` | Return the true Boolean singleton. |
+| `constFalse` | `FALSE` | Return the false Boolean singleton. |
+| `cond c t f` | `if c then t else f` | Evaluate `c`; evaluate `t` for TRUE or `f` for FALSE. |
+| `isInstance x C` | `isInstance(x, C)` | Test whether the bound object's runtime MRO contains `C`. |
 
-The important design choice is that `isInstance` takes a variable name rather
-than an arbitrary expression. That restriction is deliberate: the type system
-uses `isInstance` as a narrowing construct, so the test has to refer to a name
-whose type can be refined on each branch.
+A *bound method* combines a selected method definition with its receiver.
+Attribute access allocates an object that stores this pair. The resulting value
+can be passed to another method or called later.
 
-## Built-In Names
+`isInstance` takes a variable name. This lets the type checker refine that
+variable's type in each branch of a conditional. A positive test establishes
+class membership; a negative test establishes class exclusion.
 
-The syntax layer fixes four distinguished class names:
+## Builtin classes and constants
 
-- `Object`
-- `Bool`
-- `NoneType`
-- `BoundMethod`
+| Class | Meaning |
+| --- | --- |
+| `Object` | The root ancestor of every class. |
+| `Bool` | The class of the TRUE and FALSE singletons. |
+| `NoneType` | The class of the NONE singleton. |
+| `BoundMethod` | The class of objects that store a receiver and a method. |
 
-It also fixes three distinguished object identifiers:
+Bool, NoneType, and BoundMethod are sealed: a different class cannot inherit
+from them. The class-table validation rules enforce this restriction.
 
-| Name | Meaning | Object ID |
+`new C` requires a declared class and excludes Bool, NoneType, and BoundMethod.
+Constants provide Bool and NoneType values; attribute lookup creates BoundMethod values.
+
+Every runtime value is an object reference. The initial heap contains the three
+constant objects:
+
+| Constant | Object identifier | Class |
 | --- | --- | --- |
-| `noneOid` | the object returned by `NONE` | `0` |
-| `trueOid` | the object returned by `TRUE` | `1` |
-| `falseOid` | the object returned by `FALSE` | `2` |
+| `NONE` | `noneOid = 0` | `NoneType` |
+| `TRUE` | `trueOid = 1` | `Bool` |
+| `FALSE` | `falseOid = 2` | `Bool` |
 
-These names matter throughout the rest of the development:
+These definitions are in [Builtins.lean](../FwPython/Builtins.lean).
 
-- `Object` is the nominal root of the class hierarchy.
-- `Bool` and `NoneType` support the distinguished runtime constants.
-- `BoundMethod` is the runtime class used for reified method values.
+## Scope
 
-The syntax file only fixes the names and identifiers. Their semantic role is
-explained by the runtime and typing documents.
+The language focuses on inheritance, method lookup, function types, and branch
+refinement. Methods with one argument avoid extra rules for argument lists.
+The absence of fields avoids mutation rules. These choices keep the safety proofs
+focused on calls and class tests.
 
-## Runtime Reading of the Syntax
-
-Although the syntax files only define the abstract syntax tree, two runtime facts
-help explain why the expression forms look the way they do.
-
-First, every runtime value is an object reference. FwPython does not have a
-separate runtime category for booleans, `None`, or functions.
-
-Second, every heap object carries:
-
-- a runtime class name
-- a payload
-
-Most payloads are ordinary. Bound methods are represented as ordinary heap
-objects whose payload stores:
-
-- the receiver object id
-- the selected method declaration
-
-This is why attribute access is not just a static projection. Operationally, it
-allocates a fresh heap object of class `BoundMethod`, and that object can then
-be passed around like any other value.
-
-## Why the Language Looks This Way
-
-### No Fields
-
-FwPython omits fields to keep the metatheory focused on dispatch, subtyping,
-callability, and flow-sensitive reasoning. Read-only field-like behavior can be
-encoded with methods that ignore their argument.
-
-### Unary Methods
-
-Unary methods make the operational semantics and variance story much cleaner.
-The language still exercises the important interaction between method lookup and
-call application without adding tuple-like argument structure.
-
-### Variable-Only `isInstance`
-
-The `isInstance` form exists primarily to support narrowing in conditionals.
-Allowing arbitrary expressions there would require a separate story for naming
-and tracking the tested value across branches.
-
-### Python-Inspired, Not Python-Complete
-
-FwPython borrows some recognizable object-oriented features from Python:
-
-- multiple inheritance
-- C3 linearization
-- runtime method lookup
-- reified bound methods
-- runtime class tests
-
-But it deliberately omits the rest of Python's object model. The point of the
-language is not realism for its own sake; it is to isolate a precise formal core
-that is still rich enough to make the metatheory interesting.
+FwPython takes these features from Python but specifies its own small language.
+It does not model Python statements, constructors, fields, or descriptors.

@@ -1,3 +1,4 @@
+import FwPython.Common.MRO.Compute
 import FwPython.Static.MRO.Properties
 import FwPython.Gradual.Embedding
 import FwPython.Gradual.ClassTable
@@ -12,36 +13,15 @@ abbrev GComputeMro := ComputeMro (Method := GMethod)
 
 /-! ## Executable MRO search -/
 
-mutual
 /-- Fuel-bounded executable gradual MRO computation for a single class name. -/
-def computeGMroFuel? : GClassTable → Nat → Identifier → Option (List Identifier)
-  | _, 0, _ => none
-  | gct, fuel + 1, cname =>
-      match findGClass gct cname with
-      | none => none
-      | some cls =>
-          match cls.resolvedBases with
-          | [] => some [cls.name]
-          | b :: rest =>
-              let bases := b :: rest
-              match computeAllParentMrosFuel? gct fuel bases with
-              | none => none
-              | some parentMros =>
-                  match c3Merge (parentMros ++ [bases]) with
-                  | none => none
-                  | some mergedSuffix => some (cls.name :: mergedSuffix)
-termination_by _gct fuel _cname => (fuel, 0)
+def computeGMroFuel? (gct : GClassTable) (fuel : Nat) (cname : Identifier) :
+    Option (List Identifier) :=
+  Common.MRO.computeMroFuel? gct fuel cname
 
 /-- Fuel-bounded executable gradual MRO computation for every direct base. -/
-def computeAllParentMrosFuel? :
-    GClassTable → Nat → List Identifier → Option (List (List Identifier))
-  | _, _, [] => some []
-  | gct, fuel, bname :: rest =>
-      match computeGMroFuel? gct fuel bname, computeAllParentMrosFuel? gct fuel rest with
-      | some mro, some restMros => some (mro :: restMros)
-      | _, _ => none
-termination_by _gct fuel bases => (fuel, bases.length.succ)
-end
+def computeAllParentMrosFuel? (gct : GClassTable) (fuel : Nat)
+    (bases : List Identifier) : Option (List (List Identifier)) :=
+  Common.MRO.computeAllParentMrosFuel? gct fuel bases
 
 /-- The executable gradual MRO search uses `gct.length` as global fuel. -/
 def computeGMro? (gct : GClassTable) (cname : Identifier) : Option (List Identifier) :=
@@ -63,103 +43,25 @@ theorem findGClass_self (h : findGClass ct cname = some c) :
 
 /-! ## Executable-search soundness and proof heights -/
 
-private theorem computeMroFuel_sound_pair (gct : GClassTable) :
-    ∀ fuel,
-      (∀ cname mro,
-        computeGMroFuel? gct fuel cname = some mro →
-          ∃ cls, findGClass gct cname = some cls ∧ GComputeMro gct cls mro) ∧
-      (∀ bases parentMros,
-        computeAllParentMrosFuel? gct fuel bases = some parentMros →
-          GAllParentMros gct bases parentMros)
-  | 0 =>
-      ⟨
-        by
-          intro cname mro hcomp
-          simp [computeGMroFuel?] at hcomp,
-        by
-          intro bases parentMros hcomp
-          induction bases generalizing parentMros with
-          | nil =>
-              simp [computeAllParentMrosFuel?] at hcomp
-              cases hcomp
-              exact .nil
-          | cons b rest ih =>
-              simp [computeAllParentMrosFuel?, computeGMroFuel?] at hcomp
-      ⟩
-  | fuel + 1 =>
-      let ⟨ihMro, ihParents⟩ := computeMroFuel_sound_pair gct fuel
-      let hMro :
-          ∀ cname mro,
-            computeGMroFuel? gct (fuel + 1) cname = some mro →
-              ∃ cls, findGClass gct cname = some cls ∧ GComputeMro gct cls mro := by
-        intro cname mro hcomp
-        simp [computeGMroFuel?] at hcomp
-        cases hfind : findGClass gct cname with
-        | none =>
-            simp [hfind] at hcomp
-        | some cls =>
-            cases hbases : cls.resolvedBases with
-            | nil =>
-                simp [hfind, hbases] at hcomp
-                cases hcomp
-                exact ⟨cls, rfl, .root hbases⟩
-            | cons b rest =>
-                cases hparents : computeAllParentMrosFuel? gct fuel (b :: rest) with
-                | none =>
-                    simp [hfind, hbases, hparents] at hcomp
-                | some parentMros =>
-                    cases hmerge : c3Merge (parentMros ++ [b :: rest]) with
-                    | none =>
-                        simp [hfind, hbases, hparents, hmerge] at hcomp
-                    | some mergedSuffix =>
-                        simp [hfind, hbases, hparents, hmerge] at hcomp
-                        cases hcomp
-                        exact ⟨cls, rfl, .step hbases (by simp) (ihParents _ _ hparents) hmerge⟩
-      let hParents :
-          ∀ bases parentMros,
-            computeAllParentMrosFuel? gct (fuel + 1) bases = some parentMros →
-              GAllParentMros gct bases parentMros := by
-        intro bases parentMros hcomp
-        induction bases generalizing parentMros with
-        | nil =>
-            simp [computeAllParentMrosFuel?] at hcomp
-            cases hcomp
-            exact .nil
-        | cons b rest ih =>
-            simp [computeAllParentMrosFuel?] at hcomp
-            cases hgmro : computeGMroFuel? gct (fuel + 1) b with
-            | none =>
-                simp [hgmro] at hcomp
-            | some mro =>
-                cases hrest : computeAllParentMrosFuel? gct (fuel + 1) rest with
-                | none =>
-                    simp [hgmro, hrest] at hcomp
-                | some restMros =>
-                    simp [hgmro, hrest] at hcomp
-                    cases hcomp
-                    obtain ⟨bcls, hfind, hmro⟩ := hMro _ _ hgmro
-                    exact .cons hfind hmro (ih _ hrest)
-      ⟨hMro, hParents⟩
-
 theorem computeGMroFuel?_sound
     (hcomp : computeGMroFuel? gct fuel cname = some mro) :
     ∃ cls, findGClass gct cname = some cls ∧ GComputeMro gct cls mro :=
-  (computeMroFuel_sound_pair gct fuel).1 _ _ hcomp
+  Common.MRO.computeMroFuel?_sound hcomp
 
 theorem computeAllParentMrosFuel?_sound
     (hcomp : computeAllParentMrosFuel? gct fuel bases = some parentMros) :
     GAllParentMros gct bases parentMros :=
-  (computeMroFuel_sound_pair gct fuel).2 _ _ hcomp
+  Common.MRO.computeAllParentMrosFuel?_sound hcomp
 
 theorem computeGMro?_sound
     (hcomp : computeGMro? gct cname = some mro) :
     ∃ cls, findGClass gct cname = some cls ∧ GComputeMro gct cls mro :=
-  computeGMroFuel?_sound hcomp
+  Common.MRO.computeMro?_sound hcomp
 
 theorem computeAllParentMros?_sound
     (hcomp : computeAllParentMros? gct bases = some parentMros) :
     GAllParentMros gct bases parentMros :=
-  computeAllParentMrosFuel?_sound hcomp
+  Common.MRO.computeAllParentMros?_sound hcomp
 
 mutual
 /-- Exact recursive replay budget for an `GAllParentMros` derivation. -/
@@ -264,19 +166,29 @@ theorem computeAllParentMrosFuel?_complete_of_height
     (motive_2 := fun gct c mro fuelHeight _ =>
       ∀ fuel cname, findGClass gct cname = some c →
         fuelHeight ≤ fuel → computeGMroFuel? gct fuel cname = some mro)
-    (fun fuel _ => by simp [computeAllParentMrosFuel?])
-    (fun hfind _ _ ihMro ihRest fuel hle => by
+    (fun fuel _ => by
+      simp [computeAllParentMrosFuel?, Common.MRO.computeAllParentMrosFuel?])
+    (fun {ct} {bname} {bcls} {mro} {fuelHead} {rest} {restMros} {fuelRest}
+        hfind _ _ ihMro ihRest fuel hle => by
       have hhead : _ ≤ fuel := Nat.le_trans (Nat.le_max_left _ _) hle
       have hrest : _ ≤ fuel := Nat.le_trans (Nat.le_max_right _ _) hle
-      simp [computeAllParentMrosFuel?,
-        ihMro _ _ hfind hhead,
-        ihRest _ hrest])
+      have hMro := ihMro _ _ hfind hhead
+      have hRest := ihRest _ hrest
+      have hMroCommon :
+          Common.MRO.computeMroFuel? ct fuel bname = some mro := by
+        simpa [computeGMroFuel?] using hMro
+      have hRestCommon :
+          Common.MRO.computeAllParentMrosFuel? ct fuel rest = some restMros := by
+        simpa [computeAllParentMrosFuel?] using hRest
+      change Common.MRO.computeAllParentMrosFuel? ct fuel (bname :: rest) =
+        some (mro :: restMros)
+      simp [Common.MRO.computeAllParentMrosFuel?, hMroCommon, hRestCommon])
     (fun hnil fuel cname hfind hle => by
       cases fuel with
       | zero =>
           cases hle
       | succ fuel =>
-          simp [computeGMroFuel?, hfind, hnil])
+          simp [computeGMroFuel?, Common.MRO.computeMroFuel?, hfind, hnil])
     (fun {bases} {ct} {parentMros} {fuelParents} {mergedSuffix} {c}
          hbases hne _ hmerge ihParents fuel cname hfind hle => by
       cases fuel with
@@ -288,7 +200,13 @@ theorem computeAllParentMrosFuel?_complete_of_height
           | nil =>
               exact (hne rfl).elim
           | cons b rest =>
-              simp [computeGMroFuel?, hfind, hbases, ihParents _ hparents, hmerge])
+              have hParents := ihParents _ hparents
+              have hParentsCommon :
+                  Common.MRO.computeAllParentMrosFuel? ct fuel (b :: rest) =
+                    some parentMros := by
+                simpa [computeAllParentMrosFuel?] using hParents
+              simp [computeGMroFuel?, Common.MRO.computeMroFuel?, hfind, hbases,
+                hParentsCommon, hmerge])
     hh
   exact key _ hle
 
@@ -303,19 +221,29 @@ theorem computeGMroFuel?_complete_of_height
     (motive_2 := fun gct c mro fuelHeight _ =>
       ∀ fuel cname, findGClass gct cname = some c →
         fuelHeight ≤ fuel → computeGMroFuel? gct fuel cname = some mro)
-    (fun fuel _ => by simp [computeAllParentMrosFuel?])
-    (fun hfind _ _ ihMro ihRest fuel hle => by
+    (fun fuel _ => by
+      simp [computeAllParentMrosFuel?, Common.MRO.computeAllParentMrosFuel?])
+    (fun {ct} {bname} {bcls} {mro} {fuelHead} {rest} {restMros} {fuelRest}
+        hfind _ _ ihMro ihRest fuel hle => by
       have hhead : _ ≤ fuel := Nat.le_trans (Nat.le_max_left _ _) hle
       have hrest : _ ≤ fuel := Nat.le_trans (Nat.le_max_right _ _) hle
-      simp [computeAllParentMrosFuel?,
-        ihMro _ _ hfind hhead,
-        ihRest _ hrest])
+      have hMro := ihMro _ _ hfind hhead
+      have hRest := ihRest _ hrest
+      have hMroCommon :
+          Common.MRO.computeMroFuel? ct fuel bname = some mro := by
+        simpa [computeGMroFuel?] using hMro
+      have hRestCommon :
+          Common.MRO.computeAllParentMrosFuel? ct fuel rest = some restMros := by
+        simpa [computeAllParentMrosFuel?] using hRest
+      change Common.MRO.computeAllParentMrosFuel? ct fuel (bname :: rest) =
+        some (mro :: restMros)
+      simp [Common.MRO.computeAllParentMrosFuel?, hMroCommon, hRestCommon])
     (fun hnil fuel cname hfind hle => by
       cases fuel with
       | zero =>
           cases hle
       | succ fuel =>
-          simp [computeGMroFuel?, hfind, hnil])
+          simp [computeGMroFuel?, Common.MRO.computeMroFuel?, hfind, hnil])
     (fun {bases} {ct} {parentMros} {fuelParents} {mergedSuffix} {c}
          hbases hne _ hmerge ihParents fuel cname hfind hle => by
       cases fuel with
@@ -327,7 +255,13 @@ theorem computeGMroFuel?_complete_of_height
           | nil =>
               exact (hne rfl).elim
           | cons b rest =>
-              simp [computeGMroFuel?, hfind, hbases, ihParents _ hparents, hmerge])
+              have hParents := ihParents _ hparents
+              have hParentsCommon :
+                  Common.MRO.computeAllParentMrosFuel? ct fuel (b :: rest) =
+                    some parentMros := by
+                simpa [computeAllParentMrosFuel?] using hParents
+              simp [computeGMroFuel?, Common.MRO.computeMroFuel?, hfind, hbases,
+                hParentsCommon, hmerge])
     hh
   exact key _ _ hfind hle
 end

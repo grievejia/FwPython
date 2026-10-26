@@ -150,54 +150,8 @@ theorem mro_order_propagation
     (ha_in_mro : acls.name ∈ mro_c)
     {x y : Identifier}
     (hab : appearsBefore x y mro_a = true) :
-    appearsBefore x y mro_c = true := by
-  have key := ComputeMro.rec
-    (motive_1 := fun ct _ parentMros _ =>
-      ∀ pm, pm ∈ parentMros →
-      ∀ (acls : Class) (mro_a : List Identifier) (x y : Identifier),
-        findClass ct acls.name = some acls → ComputeMro ct acls mro_a →
-        acls.name ∈ pm → appearsBefore x y mro_a = true →
-        appearsBefore x y pm = true)
-    (motive_2 := fun ct c mro _ =>
-      ∀ (acls : Class) (mro_a : List Identifier) (x y : Identifier),
-        findClass ct c.name = some c →
-        findClass ct acls.name = some acls → ComputeMro ct acls mro_a →
-        acls.name ∈ mro → appearsBefore x y mro_a = true →
-        appearsBefore x y mro = true)
-    (fun _ hm => absurd hm List.not_mem_nil)
-    (fun hfind _ _ ih_mro ih_rest pm hmem acls' mro_a' x' y' hfa' hma' ha'mem hab' => by
-      rcases List.mem_cons.mp hmem with rfl | hmem'
-      · exact ih_mro acls' mro_a' x' y' (findClass_self hfind) hfa' hma' ha'mem hab'
-      · exact ih_rest pm hmem' acls' mro_a' x' y' hfa' hma' ha'mem hab')
-    (fun hnil acls' mro_a' x' y' hfc' hfa' hma' ha'mem hab' => by
-      simp only [List.mem_cons, List.mem_nil_iff, or_false] at ha'mem
-      rw [ha'mem] at hfa'; rw [hfc'] at hfa'; cases hfa'
-      rw [determinism hma' (.root hnil)] at hab'; exact hab')
-    (fun {_} {ct} {_} {mergedSuffix} {c}
-         hbases hne hall hmerge ih_parents acls' mro_a' x' y' hfc' hfa' hma' ha'mem hab' => by
-      simp only [List.mem_cons] at ha'mem
-      cases ha'mem with
-      | inl ha'eq =>
-        rw [ha'eq] at hfa'; rw [hfc'] at hfa'; cases hfa'
-        rw [determinism hma' (.step hbases hne hall hmerge)] at hab'; exact hab'
-      | inr ha'in_merged =>
-        have hab_merged : appearsBefore x' y' mergedSuffix = true := by
-          obtain ⟨l, hl, ha'l⟩ := c3Merge_sound hmerge acls'.name ha'in_merged
-          rcases List.mem_append.mp hl with hl_pm | hl_bases
-          · exact c3Merge_order_preserving hmerge l (List.mem_append_left _ hl_pm) x' y'
-              (ih_parents l hl_pm acls' mro_a' x' y' hfa' hma' ha'l hab')
-          · simp only [List.mem_cons, List.mem_nil_iff, or_false] at hl_bases; subst hl_bases
-            obtain ⟨_, mro', hfa'', hmro', hpmem⟩ := allParentMros_mem hall ha'l
-            rw [hfa'] at hfa''; cases hfa''
-            rw [determinism hmro' hma'] at hpmem
-            exact c3Merge_order_preserving hmerge mro_a'
-              (List.mem_append_left _ hpmem) x' y' hab'
-        by_cases hcx : c.name = x'
-        · unfold appearsBefore; rw [if_pos hcx]
-          exact containsIdentifier_true_of_mem (appearsBefore_right_mem hab_merged)
-        · rw [appearsBefore_cons_ne hcx]; exact hab_merged)
-    hmro_c
-  exact key acls mro_a x y hfc hfa hmro_a ha_in_mro hab
+    appearsBefore x y mro_c = true :=
+  appearsBefore_sublist (mro_sublist ct c acls mro_c mro_a hfc hmro_c hfa hmro_a ha_in_mro) hab
 
 /-- If A precedes B in C's direct parent list, then A precedes B in C's MRO. -/
 theorem mro_preserves_base_order

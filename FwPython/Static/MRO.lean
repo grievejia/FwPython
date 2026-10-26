@@ -3,3 +3,4 @@ import FwPython.Static.MRO.Compute
 import FwPython.Static.MRO.Properties
 import FwPython.Static.MRO.Lookup
 import FwPython.Static.MRO.LookupLemmas
+import FwPython.Static.MRO.Structure

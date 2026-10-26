@@ -5,10 +5,6 @@ keywords = ["programming-languages", "type-systems", "gradual-typing", "metatheo
 license = "MIT"
 defaultTargets = ["FwPython", "FwPythonExamples"]
 
-[[require]]
-name = "aesop"
-scope = "leanprover-community"
-
 [leanOptions]
 pp.unicode.fun = true # pretty-prints `fun a ↦ b`
 

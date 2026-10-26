@@ -5,16 +5,17 @@ import FwPython.Common.Identifier
 /-- The gradual type language for FwPython.
     - `any` : an unknown fully static type — represents incomplete type information
     - `class_` : instance of class `C` or any subclass
-    - `callable` : a bound method taking an argument of type `T` and returning type `U`
+    - `callable` : a requirement for a bound method with accepted input type `T`
+      and type `U` for every returned result. Calls may run forever;
+      `T` and `U` can contain `any`
     - `union` : union type `T | U`
     - `intersection` : intersection type `T & U`
     - `bottom` : the empty type, subtype of everything
-    - `negClass` : negation of a class — the only form of gradual negation.
-      It may arise from `isInstance` refinement and may also appear in user
-      annotations. General gradual negation is excluded by construction, so
-      the only inhabitants are `negClass C`.
+    - `negClass` : excludes class `C` and its subclasses; the object's actual class
+      MRO must not contain `C`. It may arise from `isInstance` refinement or appear
+      in user annotations. Exclusions are limited to class names.
 
-    The universal supertype is `class_ objectClass`, not a dedicated constructor. -/
+    The universal supertype is `class_ objectClass`. -/
 inductive GTy : Type where
   | any : GTy
   | class_ : Identifier → GTy

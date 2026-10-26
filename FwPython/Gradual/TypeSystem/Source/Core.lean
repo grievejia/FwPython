@@ -1,174 +1,80 @@
 import FwPython.Common.Forall2
 import FwPython.Gradual.TypeSystem.TargetAdmissibility
-import FwPython.Gradual.TypeSystem.ProgramTargetPrecision
 import FwPython.Gradual.TypeSystem.ClassTable.WellFormednessCore
-import FwPython.Gradual.TypeSystem.CheckedTargetPrecision
 import FwPython.Gradual.TypeSystem.Method.TypeFacts
 
-/-! # Single-type gradual source core
+open FwPython.Static.Subtyping
 
-Core infrastructure for the safe-domain single-type gradual source front
-end. Source environments store exactly one gradual type per binding; any
-checked approximation is chosen later at elaboration sites. -/
+/-! # Source environments and type inference
+
+Each source binding stores one gradual type.
+The compiler selects types for runtime checks at each use of an expression.
+The call checker selects a result type from the function and argument annotations. -/
 
 /-! ## Source environment -/
 
+/-- A variable name and its type in the source program. -/
 structure SBinding where
+  /-- The name used to look up the variable. -/
   name : Identifier
+  /-- The source type assigned to the variable. -/
   sourceTy : GTy
   deriving DecidableEq
 
+/-- Source bindings in lookup order; the first matching name controls each variable. -/
 abbrev SBindingEnv := List SBinding
 
+/-- Return the first source binding with the requested variable name. -/
 def SBindingEnv.lookupBinding : SBindingEnv → Identifier → Option SBinding
   | [], _ => none
   | b :: rest, x => if b.name = x then some b else lookupBinding rest x
 
-def SBindingEnv.lookupSource (Γ : SBindingEnv) (x : Identifier) : Option GTy :=
-  (Γ.lookupBinding x).map (·.sourceTy)
-
+/-- Change the type of the first matching binding while preserving names and order.
+A variable with no binding leaves the environment unchanged. -/
 def SBindingEnv.updateSource : SBindingEnv → Identifier → GTy → SBindingEnv
   | [], _, _ => []
   | b :: rest, x, S =>
     if b.name = x then { b with sourceTy := S } :: rest
     else b :: updateSource rest x S
 
-abbrev lookupBinding := SBindingEnv.lookupBinding
-abbrev lookupSource := SBindingEnv.lookupSource
-abbrev updateSource := SBindingEnv.updateSource
-
-/-! ## Source-callable admissibility -/
-
-inductive SourceCallableTy (gct : GClassTable) : GTy → Prop where
-  | any : SourceCallableTy gct .any
-  | class_ : SourceCallableTy gct (.class_ C)
-  | callable :
-      SourceCallableTy gct P →
-      RuntimePublicAnnotation gct R →
-      SourceCallableTy gct (.callable P R)
-  | union :
-      SourceCallableTy gct G →
-      SourceCallableTy gct H →
-      SourceCallableTy gct (.union G H)
-  | intersection :
-      SourceCallableTy gct G →
-      SourceCallableTy gct H →
-      SourceCallableTy gct (.intersection G H)
-  | bottom : SourceCallableTy gct .bottom
-  | negClass : SourceCallableTy gct (.negClass cname)
-
-private def formulaGTy_sourceCallable {gct : GClassTable} :
-    (G : GTy) → FormulaGTy G → SourceCallableTy gct G
-  | .any, .any => .any
-  | .class_ _, .class_ => .class_
-  | .union _ _, .union hf hg =>
-      .union (formulaGTy_sourceCallable _ hf) (formulaGTy_sourceCallable _ hg)
-  | .intersection _ _, .intersection hf hg =>
-      .intersection (formulaGTy_sourceCallable _ hf) (formulaGTy_sourceCallable _ hg)
-  | .bottom, .bottom => .bottom
-  | .negClass _, .negClass => .negClass
-
-private theorem checkedTargetTy_to_sourceCallableTy
-    {gct : GClassTable} : (G : GTy) → CheckedTargetTy gct G → SourceCallableTy gct G
-  | _, .classFormula hf => formulaGTy_sourceCallable _ hf
-  | _, .callable hP hR =>
-      .callable (checkedTargetTy_to_sourceCallableTy _ hP) (runtimePublicAnnotation_mk hR)
-  | _, .union hG hH =>
-      .union (checkedTargetTy_to_sourceCallableTy _ hG)
-        (checkedTargetTy_to_sourceCallableTy _ hH)
-  | _, .interCallableLeft hP hR hbm =>
-      .intersection
-        (.callable
-          (checkedTargetTy_to_sourceCallableTy _ hP)
-          (runtimePublicAnnotation_mk hR))
-        (formulaGTy_sourceCallable _ hbm.toFormula)
-  | _, .interCallableRight hbm hP hR =>
-      .intersection
-        (formulaGTy_sourceCallable _ hbm.toFormula)
-        (.callable
-          (checkedTargetTy_to_sourceCallableTy _ hP)
-          (runtimePublicAnnotation_mk hR))
-
-theorem runtimePublicAnnotation_to_sourceCallableTy
-    {gct : GClassTable} (G : GTy) (hchecked : RuntimePublicAnnotation gct G) :
-    SourceCallableTy gct G :=
-  checkedTargetTy_to_sourceCallableTy G (runtimePublicAnnotation_checked hchecked)
-
 /-! ## Environment invariants -/
 
-def SourceEnvOk (gct : GClassTable) (Γ : SBindingEnv) : Prop :=
-  ∀ b ∈ Γ,
-    SourceCallableTy gct b.sourceTy ∧
-    WellFormedGTy gct b.sourceTy
-
-structure ElabBindingRel (gct : GClassTable)
+/-- A source binding and its checked binding name the same variable.
+The checked type includes the source type's upper bound under the supplied hierarchy. -/
+structure ElabBindingRel (gct : GClassTable) (structural : WellFormedClassHierarchy (eraseClassTable gct))
     (b : SBinding) (p : Identifier × GTy) : Prop where
+  /-- Both bindings have the same variable lookup name. -/
   name_eq : b.name = p.1
-  checked_target : RuntimePublicAnnotation gct p.2
+  /-- The checked binding's type can be represented by runtime checks. -/
+  checked_target : CheckedTargetTy gct p.2
+  /-- Every class name in the checked type exists and has an MRO. -/
   checked_wf : WellFormedGTy gct p.2
-  source_sub_checked : GradualSubtype gct b.sourceTy p.2
+  /-- The source upper bound is below the checked upper bound.
+  The subtype proof certifies known source names; the table's MRO evidence
+  then establishes validity of the source annotation. -/
+  source_sub_checked : GradualSubtype gct structural b.sourceTy p.2
 
-abbrev ElabEnvOk (gct : GClassTable) (Γ : SBindingEnv) (Δ : GTyEnv) :=
-  Forall₂ (ElabBindingRel gct) Γ Δ
+abbrev ElabEnvOk (gct : GClassTable) (structural : WellFormedClassHierarchy (eraseClassTable gct)) (Γ : SBindingEnv) (Δ : GTyEnv) :=
+  Forall₂ (ElabBindingRel gct structural) Γ Δ
+
+section
 
 /-! ## Environment lemmas -/
 
-theorem sourceEnvOk_lookup
-    (hok : SourceEnvOk gct Γ)
-    (hlook : Γ.lookupBinding x = some b) :
-    SourceCallableTy gct b.sourceTy ∧
-    WellFormedGTy gct b.sourceTy := by
-  induction Γ with
-  | nil =>
-    simp [SBindingEnv.lookupBinding] at hlook
-  | cons hd rest ih =>
-    by_cases hname : hd.name = x
-    · simp [SBindingEnv.lookupBinding, hname] at hlook
-      cases hlook
-      exact hok _ (.head _)
-    · simp [SBindingEnv.lookupBinding, hname] at hlook
-      exact ih (fun b' hb' => hok b' (.tail _ hb')) hlook
-
-theorem sourceEnvOk_updateSource
-    (hok : SourceEnvOk gct Γ)
-    (hlook : Γ.lookupBinding x = some b)
-    (hsrc : SourceCallableTy gct newSrc)
-    (hwf : WellFormedGTy gct newSrc) :
-    SourceEnvOk gct (Γ.updateSource x newSrc) := by
-  intro b' hb'
-  induction Γ with
-  | nil =>
-    simp [SBindingEnv.updateSource] at hb'
-  | cons hd rest ih =>
-    by_cases heq : hd.name = x
-    · simp [SBindingEnv.updateSource, heq] at hb'
-      cases hb' with
-      | inl hb' =>
-        cases hb'
-        exact ⟨hsrc, hwf⟩
-      | inr hb' =>
-        exact hok b' (.tail _ hb')
-    · simp [SBindingEnv.updateSource, heq] at hb'
-      cases hb' with
-      | inl hb' =>
-        cases hb'
-        exact hok _ (.head _)
-      | inr hb' =>
-        simp [SBindingEnv.lookupBinding, heq] at hlook
-        exact ih (fun b'' hb'' => hok b'' (.tail _ hb'')) hlook hb'
+variable {gct : GClassTable} {structural : WellFormedClassHierarchy (eraseClassTable gct)}
 
 theorem elabEnvOk_lookup
-    (hok : ElabEnvOk gct Γ Δ)
+    (hok : ElabEnvOk gct structural Γ Δ)
     (hlook : Γ.lookupBinding x = some b) :
     ∃ T,
       Δ.lookup x = some T ∧
-      RuntimePublicAnnotation gct T ∧
+      CheckedTargetTy gct T ∧
       WellFormedGTy gct T ∧
-      GradualSubtype gct b.sourceTy T := by
+      GradualSubtype gct structural b.sourceTy T := by
   induction hok generalizing x b with
   | nil =>
     simp [SBindingEnv.lookupBinding] at hlook
-  | @cons b₀ p₀ Γ Δ hrel hrest ih =>
+  | @cons b₀ p₀ Γ Δ hrel _ ih =>
     by_cases hname : b₀.name = x
     · simp [SBindingEnv.lookupBinding, hname] at hlook
       cases hlook
@@ -186,78 +92,14 @@ theorem elabEnvOk_lookup
       obtain ⟨T, hΔ, hct, hwf, hsub⟩ := ih hlook
       exact ⟨T, by simp [NamedEnv.lookup, hp, hΔ], hct, hwf, hsub⟩
 
-theorem elabEnvOk_lookup_runtimePublic
-    (hok : ElabEnvOk gct Γ Δ)
-    (hlookΓ : Γ.lookupBinding x = some b)
-    (hlookΔ : Δ.lookup x = some T) :
-    RuntimePublicAnnotation gct T := by
-  obtain ⟨T', hlookΔ', hchecked, _, _⟩ := elabEnvOk_lookup hok hlookΓ
-  rw [hlookΔ] at hlookΔ'
-  cases hlookΔ'
-  simpa using hchecked
-
-theorem elabEnvOk_lookup_wellFormed
-    (hok : ElabEnvOk gct Γ Δ)
-    (hlookΓ : Γ.lookupBinding x = some b)
-    (hlookΔ : Δ.lookup x = some T) :
-    WellFormedGTy gct T := by
-  obtain ⟨T', hlookΔ', _, hwf, _⟩ := elabEnvOk_lookup hok hlookΓ
-  rw [hlookΔ] at hlookΔ'
-  cases hlookΔ'
-  simpa using hwf
-
-theorem elabEnvOk_lookup_sourceSubtype
-    (hok : ElabEnvOk gct Γ Δ)
-    (hlookΓ : Γ.lookupBinding x = some b)
-    (hlookΔ : Δ.lookup x = some T) :
-    GradualSubtype gct b.sourceTy T := by
-  obtain ⟨T', hlookΔ', _, _, hsub⟩ := elabEnvOk_lookup hok hlookΓ
-  rw [hlookΔ] at hlookΔ'
-  cases hlookΔ'
-  simpa using hsub
-
-theorem elabEnvOk_updateSource
-    (hok : ElabEnvOk gct Γ Δ)
-    (hlookΓ : Γ.lookupBinding x = some b)
-    (hlookΔ : Δ.lookup x = some T)
-    (hsub : GradualSubtype gct newSrc T) :
-    ElabEnvOk gct (Γ.updateSource x newSrc) Δ := by
-  induction hok generalizing x b T with
-  | nil =>
-    simp [SBindingEnv.lookupBinding] at hlookΓ
-  | @cons b₀ p₀ Γ Δ hrel hrest ih =>
-    by_cases hname : b₀.name = x
-    · simp [SBindingEnv.lookupBinding, hname] at hlookΓ
-      cases hlookΓ
-      have hx : x = p₀.1 := hname.symm.trans hrel.name_eq
-      have hT : p₀.2 = T := by
-        simpa [NamedEnv.lookup, hx] using hlookΔ
-      cases hT
-      have hrel' : ElabBindingRel gct { b₀ with sourceTy := newSrc } p₀ := {
-        name_eq := hrel.name_eq
-        checked_target := hrel.checked_target
-        checked_wf := hrel.checked_wf
-        source_sub_checked := hsub
-      }
-      simpa [SBindingEnv.updateSource, hname] using (Forall₂.cons hrel' hrest)
-    · simp [SBindingEnv.lookupBinding, hname] at hlookΓ
-      have hx : x ≠ p₀.1 := by
-        intro hEq
-        exact hname (hrel.name_eq.trans hEq.symm)
-      have hp : p₀.1 ≠ x := by
-        intro hEq
-        exact hx hEq.symm
-      simpa [SBindingEnv.updateSource, hname] using
-        (Forall₂.cons hrel (ih hlookΓ (by simpa [NamedEnv.lookup, hp] using hlookΔ) hsub))
-
 theorem elabEnvOk_updateBoth
-    (hok : ElabEnvOk gct Γ Δ)
+    (hok : ElabEnvOk gct structural Γ Δ)
     (hlookΓ : Γ.lookupBinding x = some b)
     (hlookΔ : Δ.lookup x = some T)
-    (hchecked : RuntimePublicAnnotation gct newChecked)
+    (hchecked : CheckedTargetTy gct newChecked)
     (hwf : WellFormedGTy gct newChecked)
-    (hsub : GradualSubtype gct newSrc newChecked) :
-    ElabEnvOk gct (Γ.updateSource x newSrc) (Δ.update x newChecked) := by
+    (hsub : GradualSubtype gct structural newSrc newChecked) :
+    ElabEnvOk gct structural (Γ.updateSource x newSrc) (Δ.update x newChecked) := by
   induction hok generalizing x b T with
   | nil =>
     simp [SBindingEnv.lookupBinding] at hlookΓ
@@ -271,83 +113,29 @@ theorem elabEnvOk_updateBoth
         simpa [NamedEnv.lookup, hx] using hlookΔ
       cases hT
       have hrel' :
-          ElabBindingRel gct { b₀ with sourceTy := newSrc } (p₀.1, newChecked) := {
+          ElabBindingRel gct structural { b₀ with sourceTy := newSrc } (p₀.1, newChecked) := {
         name_eq := by simpa using hrel.name_eq
         checked_target := hchecked
         checked_wf := hwf
         source_sub_checked := hsub
       }
       have hok' :
-          ElabEnvOk gct ({ b₀ with sourceTy := newSrc } :: Γ) ((p₀.1, newChecked) :: Δ) :=
+          ElabEnvOk gct structural ({ b₀ with sourceTy := newSrc } :: Γ) ((p₀.1, newChecked) :: Δ) :=
         .cons hrel' hrest
       simpa [SBindingEnv.updateSource, GTyEnv.update, NamedEnv.update, hname, hp] using hok'
     · simp [SBindingEnv.lookupBinding, hname] at hlookΓ
-      have hx : x ≠ p₀.1 := by
-        intro hEq
-        exact hname (hrel.name_eq.trans hEq.symm)
       have hp : p₀.1 ≠ x := by
         intro hEq
         exact hname (hrel.name_eq.trans hEq)
       have hok' :
-          ElabEnvOk gct (b₀ :: SBindingEnv.updateSource Γ x newSrc)
+          ElabEnvOk gct structural (b₀ :: SBindingEnv.updateSource Γ x newSrc)
             (p₀ :: GTyEnv.update Δ x newChecked) :=
         .cons hrel (ih hlookΓ (by simpa [NamedEnv.lookup, hp] using hlookΔ))
       simpa [SBindingEnv.updateSource, GTyEnv.update, NamedEnv.update, hname, hp] using hok'
 
-/-! ## Gradual subtype helpers -/
-
-theorem gradualSubtype_union_left
-    (gct : GClassTable) (G H : GTy) :
-    GradualSubtype gct G (.union G H) := by
-  simpa [GradualSubtype, upperBound] using IsSubtype.unionLeft IsSubtype.refl
-
-theorem gradualSubtype_union_right
-    (gct : GClassTable) (G H : GTy) :
-    GradualSubtype gct H (.union G H) := by
-  simpa [GradualSubtype, upperBound] using IsSubtype.unionRight IsSubtype.refl
-
-theorem gradualSubtype_union_mono
-    (hG : GradualSubtype gct G₁ G₂)
-    (hH : GradualSubtype gct H₁ H₂) :
-    GradualSubtype gct (.union G₁ H₁) (.union G₂ H₂) := by
-  simpa [GradualSubtype, upperBound] using
-    IsSubtype.unionElim
-      (IsSubtype.trans hG (IsSubtype.unionLeft IsSubtype.refl))
-      (IsSubtype.trans hH (IsSubtype.unionRight IsSubtype.refl))
-
-theorem gradualSubtype_intersection_left
-    (gct : GClassTable) (G H : GTy) :
-    GradualSubtype gct (.intersection G H) G := by
-  simpa [GradualSubtype, upperBound] using IsSubtype.interLeft IsSubtype.refl
-
-theorem gradualSubtype_intersection_right
-    (gct : GClassTable) (G H : GTy) :
-    GradualSubtype gct (.intersection G H) H := by
-  simpa [GradualSubtype, upperBound] using IsSubtype.interRight IsSubtype.refl
-
-theorem gradualSubtype_intersection_mono
-    (hG : GradualSubtype gct G₁ G₂)
-    (hH : GradualSubtype gct H₁ H₂) :
-    GradualSubtype gct (.intersection G₁ H₁) (.intersection G₂ H₂) := by
-  simpa [GradualSubtype, upperBound] using
-    IsSubtype.interIntro
-      (IsSubtype.trans (IsSubtype.interLeft IsSubtype.refl) hG)
-      (IsSubtype.trans (IsSubtype.interRight IsSubtype.refl) hH)
-
 /-! ## Method lookup -/
 
-theorem findGMethodType_unique
-    (h1 : FindGMethodType gct C attr P₁ R₁)
-    (h2 : FindGMethodType gct C attr P₂ R₂) :
-    P₁ = P₂ ∧ R₁ = R₂ := by
-  obtain ⟨c₁, mro₁, m₁, hfc₁, hmro₁, hfm₁, rfl, rfl⟩ := h1
-  obtain ⟨c₂, mro₂, m₂, hfc₂, hmro₂, hfm₂, rfl, rfl⟩ := h2
-  rw [hfc₁] at hfc₂
-  cases hfc₂
-  cases gComputeMro_determinism hmro₁ hmro₂
-  rw [hfm₁] at hfm₂
-  cases hfm₂
-  exact ⟨rfl, rfl⟩
+end
 
 def lookupMethodTy? (gct : GClassTable) (C : Identifier)
     (attr : Identifier) : Option (GTy × GTy) :=
@@ -392,23 +180,6 @@ private theorem lookupMethodTy?_find
               cases hfc'
               rcases hlookup with ⟨hparam, hreturn⟩
               exact ⟨c, mro, m, hfc, hmro, hfm, hparam, hreturn⟩
-
-theorem lookupMethodTy?_eq_none_iff :
-    lookupMethodTy? gct C attr = none ↔
-      ¬ ∃ P R, FindGMethodType gct C attr P R := by
-  constructor
-  · intro hnone hex
-    rcases hex with ⟨P, R, hfind⟩
-    rw [lookupMethodTy?_of_find hfind] at hnone
-    cases hnone
-  · intro hnot
-    cases hlookup : lookupMethodTy? gct C attr with
-    | none =>
-        rfl
-    | some pr =>
-        rcases pr with ⟨P, R⟩
-        exfalso
-        exact hnot ⟨P, R, lookupMethodTy?_find hlookup⟩
 
 /-! ## Attribute typing -/
 
@@ -620,1130 +391,387 @@ theorem attrSourceTy?_witness_of
               cases hattr
               exact .inter_both hwLeft hwRight
 
-theorem attrSourceTy?_class_find
-    (hfind : FindGMethodType gct C attr P R) :
-    attrSourceTy? gct (.class_ C) attr = some (.callable P R) := by
-  exact attrSourceTy?_of_witness (.class_some (lookupMethodTy?_of_find hfind))
-
-theorem attrSourceTy?_class_no_find
-    (hfind : ¬ ∃ P R, FindGMethodType gct C attr P R) :
-    attrSourceTy? gct (.class_ C) attr = none := by
-  exact attrSourceTy?_of_witness (.class_none (lookupMethodTy?_eq_none_iff.mpr hfind))
-
-theorem attrSourceTy?_boundMethod_find
-    (hfind : FindGMethodType gct boundMethodClass attr P R) :
-    attrSourceTy? gct (.callable P₀ R₀) attr = some (.callable P R) := by
-  exact attrSourceTy?_of_witness (.callable_some (lookupMethodTy?_of_find hfind))
-
-theorem attrSourceTy?_boundMethod_no_find
-    (hfind : ¬ ∃ P R, FindGMethodType gct boundMethodClass attr P R) :
-    attrSourceTy? gct (.callable P₀ R₀) attr = none := by
-  exact attrSourceTy?_of_witness (.callable_none (lookupMethodTy?_eq_none_iff.mpr hfind))
-
-private theorem methodTy_callable_and_wf
-    (hwfct : WellFormedGClassTableCore gct)
-    (hfind : FindGMethodType gct C attr P R) :
-    SourceCallableTy gct (.callable P R) ∧ WellFormedGTy gct (.callable P R) :=
-  let hchecked := runtimePublicAnnotation_of_findGMethodType hwfct hfind
-  let hwf := wellFormedGTy_of_findGMethodType hwfct hfind
-  ⟨.callable (runtimePublicAnnotation_to_sourceCallableTy _ hchecked.1)
-      hchecked.2,
-   .callable hwf.1 hwf.2⟩
-
-theorem attrSourceTy?_callable_and_wf
-    (hwfct : WellFormedGClassTableCore gct)
-    (hattr : attrSourceTy? gct G attr = some R) :
-    SourceCallableTy gct R ∧ WellFormedGTy gct R := by
-  have hw := attrSourceTy?_witness_of hattr
-  cases hw with
-  | any =>
-      exact ⟨.any, .any⟩
-  | bottom =>
-      exact ⟨.bottom, .bottom⟩
-  | class_some hlookup =>
-      exact methodTy_callable_and_wf hwfct (lookupMethodTy?_find hlookup)
-  | callable_some hlookup =>
-      exact methodTy_callable_and_wf hwfct (lookupMethodTy?_find hlookup)
-  | union_some hleft hright =>
-      exact
-        ⟨.union
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hleft)).1
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hright)).1,
-          .union
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hleft)).2
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hright)).2⟩
-  | inter_left hleft _ =>
-      exact attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hleft)
-  | inter_right _ hright =>
-      exact attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hright)
-  | inter_both hleft hright =>
-      exact
-        ⟨.intersection
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hleft)).1
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hright)).1,
-          .intersection
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hleft)).2
-            (attrSourceTy?_callable_and_wf hwfct (attrSourceTy?_of_witness hright)).2⟩
-
-theorem attrSourceTy?_sourceCallable
-    (hwfct : WellFormedGClassTableCore gct)
-    (hattr : attrSourceTy? gct G attr = some R) :
-    SourceCallableTy gct R :=
-  (attrSourceTy?_callable_and_wf hwfct hattr).1
-
+/-- Attribute inference returns a type whose classes and MROs are valid. -/
 theorem attrSourceTy?_wellFormed
     (hwfct : WellFormedGClassTableCore gct)
     (hattr : attrSourceTy? gct G attr = some R) :
-    WellFormedGTy gct R :=
-  (attrSourceTy?_callable_and_wf hwfct hattr).2
-
-private inductive StructuralTargetPrecision : GTy → GTy → Prop where
-  | refl :
-      StructuralTargetPrecision G G
-  | toAny :
-      StructuralTargetPrecision G .any
-  | callable :
-      StructuralTargetPrecision P₁ P₂ →
-      StructuralTargetPrecision R₁ R₂ →
-      StructuralTargetPrecision (.callable P₁ R₁) (.callable P₂ R₂)
-  | union :
-      StructuralTargetPrecision G₁ G₂ →
-      StructuralTargetPrecision H₁ H₂ →
-      StructuralTargetPrecision (.union G₁ H₁) (.union G₂ H₂)
-  | intersection :
-      StructuralTargetPrecision G₁ G₂ →
-      StructuralTargetPrecision H₁ H₂ →
-      StructuralTargetPrecision (.intersection G₁ H₁) (.intersection G₂ H₂)
-
-private theorem checkedTargetOfGTy_injective
-    (h : checkedTargetOfGTy G₁ = checkedTargetOfGTy G₂) :
-    G₁ = G₂ := by
-  induction G₁ generalizing G₂ with
-  | any =>
-      cases G₂ <;> simp [checkedTargetOfGTy] at h <;> rfl
-  | class_ =>
-      cases G₂ with
-      | class_ _ =>
-          simp [checkedTargetOfGTy] at h
-          cases h
-          rfl
-      | any => simp [checkedTargetOfGTy] at h
-      | callable _ _ => simp [checkedTargetOfGTy] at h
-      | union _ _ => simp [checkedTargetOfGTy] at h
-      | intersection _ _ => simp [checkedTargetOfGTy] at h
-      | bottom => simp [checkedTargetOfGTy] at h
-      | negClass _ => simp [checkedTargetOfGTy] at h
-  | callable P R ihP ihR =>
-      cases G₂ with
-      | callable P' R' =>
-          simp [checkedTargetOfGTy] at h
-          rcases h with ⟨hP, hR⟩
-          cases ihP hP
-          cases ihR hR
-          rfl
-      | any => simp [checkedTargetOfGTy] at h
-      | class_ _ => simp [checkedTargetOfGTy] at h
-      | union _ _ => simp [checkedTargetOfGTy] at h
-      | intersection _ _ => simp [checkedTargetOfGTy] at h
-      | bottom => simp [checkedTargetOfGTy] at h
-      | negClass _ => simp [checkedTargetOfGTy] at h
-  | union G H ihG ihH =>
-      cases G₂ with
-      | union G' H' =>
-          simp [checkedTargetOfGTy] at h
-          rcases h with ⟨hG, hH⟩
-          cases ihG hG
-          cases ihH hH
-          rfl
-      | any => simp [checkedTargetOfGTy] at h
-      | class_ _ => simp [checkedTargetOfGTy] at h
-      | callable _ _ => simp [checkedTargetOfGTy] at h
-      | intersection _ _ => simp [checkedTargetOfGTy] at h
-      | bottom => simp [checkedTargetOfGTy] at h
-      | negClass _ => simp [checkedTargetOfGTy] at h
-  | intersection G H ihG ihH =>
-      cases G₂ with
-      | intersection G' H' =>
-          simp [checkedTargetOfGTy] at h
-          rcases h with ⟨hG, hH⟩
-          cases ihG hG
-          cases ihH hH
-          rfl
-      | any => simp [checkedTargetOfGTy] at h
-      | class_ _ => simp [checkedTargetOfGTy] at h
-      | callable _ _ => simp [checkedTargetOfGTy] at h
-      | union _ _ => simp [checkedTargetOfGTy] at h
-      | bottom => simp [checkedTargetOfGTy] at h
-      | negClass _ => simp [checkedTargetOfGTy] at h
-  | bottom =>
-      cases G₂ <;> simp [checkedTargetOfGTy] at h <;> rfl
-  | negClass =>
-      cases G₂ with
-      | negClass _ =>
-          simp [checkedTargetOfGTy] at h
-          cases h
-          rfl
-      | any => simp [checkedTargetOfGTy] at h
-      | class_ _ => simp [checkedTargetOfGTy] at h
-      | callable _ _ => simp [checkedTargetOfGTy] at h
-      | union _ _ => simp [checkedTargetOfGTy] at h
-      | intersection _ _ => simp [checkedTargetOfGTy] at h
-      | bottom => simp [checkedTargetOfGTy] at h
-
-private theorem structuralTargetPrecision_of_checkedTargetPrecision :
-    ∀ {T₁ T₂ G₁ G₂},
-      CheckedTargetPrecision T₁ T₂ →
-      T₁ = checkedTargetOfGTy G₁ →
-      T₂ = checkedTargetOfGTy G₂ →
-      StructuralTargetPrecision G₁ G₂
-  | _, _, G₁, G₂, .refl, hT₁, hT₂ => by
-      have hEq : G₁ = G₂ :=
-        checkedTargetOfGTy_injective (hT₁.symm.trans hT₂)
-      cases hEq
-      exact .refl
-  | _, _, G₁, G₂, .toAny, hT₁, hT₂ => by
-      have hEq : G₂ = .any :=
-        checkedTargetOfGTy_injective hT₂.symm
-      cases hEq
-      exact .toAny
-  | _, _, G₁, G₂, .callable hParam hReturn, hT₁, hT₂ => by
-      cases G₁ with
-      | callable P₁ R₁ =>
-          cases hT₁
-          cases G₂ with
-          | callable P₂ R₂ =>
-              cases hT₂
-              exact
-                .callable
-                  (structuralTargetPrecision_of_checkedTargetPrecision hParam rfl rfl)
-                  (structuralTargetPrecision_of_checkedTargetPrecision hReturn rfl rfl)
-          | any => cases hT₂
-          | class_ _ => cases hT₂
-          | union _ _ => cases hT₂
-          | intersection _ _ => cases hT₂
-          | bottom => cases hT₂
-          | negClass _ => cases hT₂
-      | any => cases hT₁
-      | class_ _ => cases hT₁
-      | union _ _ => cases hT₁
-      | intersection _ _ => cases hT₁
-      | bottom => cases hT₁
-      | negClass _ => cases hT₁
-  | _, _, G₁, G₂, .union hLeft hRight, hT₁, hT₂ => by
-      cases G₁ with
-      | union G₁ H₁ =>
-          cases hT₁
-          cases G₂ with
-          | union G₂ H₂ =>
-              cases hT₂
-              exact
-                .union
-                  (structuralTargetPrecision_of_checkedTargetPrecision hLeft rfl rfl)
-                  (structuralTargetPrecision_of_checkedTargetPrecision hRight rfl rfl)
-          | any => cases hT₂
-          | class_ _ => cases hT₂
-          | callable _ _ => cases hT₂
-          | intersection _ _ => cases hT₂
-          | bottom => cases hT₂
-          | negClass _ => cases hT₂
-      | any => cases hT₁
-      | class_ _ => cases hT₁
-      | callable _ _ => cases hT₁
-      | intersection _ _ => cases hT₁
-      | bottom => cases hT₁
-      | negClass _ => cases hT₁
-  | _, _, G₁, G₂, .intersection hLeft hRight, hT₁, hT₂ => by
-      cases G₁ with
-      | intersection G₁ H₁ =>
-          cases hT₁
-          cases G₂ with
-          | intersection G₂ H₂ =>
-              cases hT₂
-              exact
-                .intersection
-                  (structuralTargetPrecision_of_checkedTargetPrecision hLeft rfl rfl)
-                  (structuralTargetPrecision_of_checkedTargetPrecision hRight rfl rfl)
-          | any => cases hT₂
-          | class_ _ => cases hT₂
-          | callable _ _ => cases hT₂
-          | union _ _ => cases hT₂
-          | bottom => cases hT₂
-          | negClass _ => cases hT₂
-      | any => cases hT₁
-      | class_ _ => cases hT₁
-      | callable _ _ => cases hT₁
-      | union _ _ => cases hT₁
-      | bottom => cases hT₁
-      | negClass _ => cases hT₁
-
-private theorem structuralTargetPrecision_of_annotationTargetPrecision
-    (h : AnnotationTargetPrecision G₁ G₂) :
-    StructuralTargetPrecision G₁ G₂ := by
-  exact structuralTargetPrecision_of_checkedTargetPrecision h rfl rfl
-
-private theorem annotationTargetPrecision_of_structuralTargetPrecision
-    (h : StructuralTargetPrecision G₁ G₂) :
-    AnnotationTargetPrecision G₁ G₂ := by
-  induction h with
-  | refl =>
-      exact .refl
-  | toAny =>
-      exact .toAny
-  | callable _ _ ihParam ihReturn =>
-      simpa [AnnotationTargetPrecision, checkedTargetOfGTy] using
-        CheckedTargetPrecision.callable ihParam ihReturn
-  | union _ _ ihLeft ihRight =>
-      simpa [AnnotationTargetPrecision, checkedTargetOfGTy] using
-        CheckedTargetPrecision.union ihLeft ihRight
-  | intersection _ _ ihLeft ihRight =>
-      simpa [AnnotationTargetPrecision, checkedTargetOfGTy] using
-        CheckedTargetPrecision.intersection ihLeft ihRight
+    WellFormedGTy gct R := by
+  have hw := attrSourceTy?_witness_of hattr
+  cases hw with
+  | any => exact .any
+  | bottom => exact .bottom
+  | class_some hlookup | callable_some hlookup =>
+      have methodValid := wellFormedGTy_of_findGMethodType hwfct (lookupMethodTy?_find hlookup)
+      exact .callable methodValid.1 methodValid.2
+  | union_some hleft hright =>
+      exact .union
+        (attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hleft))
+        (attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hright))
+  | inter_left hleft _ =>
+      exact attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hleft)
+  | inter_right _ hright =>
+      exact attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hright)
+  | inter_both hleft hright =>
+      exact .intersection
+        (attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hleft))
+        (attrSourceTy?_wellFormed hwfct (attrSourceTy?_of_witness hright))
 
 /-! ## Call summaries -/
 
-structure CallableFacet where
-  paramTy : GTy
-  returnTy : GTy
-  deriving DecidableEq, Repr
+/-- An input and result pair used by call selection.
+Pairs represent declared requirements, their combinations, or unknown and empty types. -/
+private structure CallableFacet (gct : GClassTable) where
+  /-- The required input annotation and proof that its classes and MROs are valid. -/
+  paramTy : WellFormedGradualType gct
+  /-- The required result annotation and proof that its classes and MROs are valid. -/
+  returnTy : WellFormedGradualType gct
+  deriving DecidableEq
 
-inductive CallableSummary where
-  | tainted
+/-- The input and result requirements found in a source function type. -/
+private inductive CallableSummary (gct : GClassTable) where
+  /-- The source type supplies no function input or result requirements. -/
   | empty
-  | leaf : CallableFacet -> CallableSummary
-  | union : CallableSummary -> CallableSummary -> CallableSummary
-  | intersection : CallableSummary -> CallableSummary -> CallableSummary
-  deriving DecidableEq, Repr
-
-def CallableFacetOk (gct : GClassTable) (f : CallableFacet) : Prop :=
-  SourceCallableTy gct f.paramTy ∧
-  WellFormedGTy gct f.paramTy ∧
-  SourceCallableTy gct f.returnTy ∧
-  WellFormedGTy gct f.returnTy
-
-inductive CallableSummaryOk (gct : GClassTable) : CallableSummary -> Prop where
-  | tainted :
-      CallableSummaryOk gct .tainted
-  | empty :
-      CallableSummaryOk gct .empty
-  | leaf
-      (hfacet : CallableFacetOk gct f) :
-      CallableSummaryOk gct (.leaf f)
-  | union
-      (hs : CallableSummaryOk gct s)
-      (ht : CallableSummaryOk gct t) :
-      CallableSummaryOk gct (.union s t)
-  | intersection
-      (hs : CallableSummaryOk gct s)
-      (ht : CallableSummaryOk gct t) :
-      CallableSummaryOk gct (.intersection s t)
-
-inductive SourceBranchTag where
-  | left
-  | right
-  deriving DecidableEq, Ord, Repr
-
-instance : Std.LawfulEqOrd SourceBranchTag where
-  compare_self := by
-    intro tag
-    cases tag <;> rfl
-  eq_of_compare := by
-    intro x y hcmp
-    cases x <;> cases y <;> cases hcmp <;> rfl
-
-abbrev SourceOriginTrace := List SourceBranchTag
-
-private def insertSourceOriginTrace
-    (trace : SourceOriginTrace) :
-    List SourceOriginTrace → List SourceOriginTrace
-  | [] => [trace]
-  | head :: tail =>
-      match compare trace head with
-      | .lt => trace :: head :: tail
-      | .eq => head :: tail
-      | .gt => head :: insertSourceOriginTrace trace tail
-
-/-- Canonical sorted-deduplicated origin traces. The derived `Ord` instance on
-`List SourceBranchTag>` gives the intended lexicographic order with
-`left < right` and shorter-prefix-first. -/
-def canonicalSourceOriginSet : List SourceOriginTrace → List SourceOriginTrace
-  | [] => []
-  | trace :: traces =>
-      insertSourceOriginTrace trace (canonicalSourceOriginSet traces)
-
-def mergeCanonicalSourceOriginSets
-    (left right : List SourceOriginTrace) :
-    List SourceOriginTrace :=
-  canonicalSourceOriginSet (left ++ right)
-
-def prefixCanonicalSourceOriginSet
-    (tag : SourceBranchTag)
-    (origins : List SourceOriginTrace) :
-    List SourceOriginTrace :=
-  canonicalSourceOriginSet (origins.map (List.cons tag))
-
-private theorem mem_insertSourceOriginTrace
-    (trace : SourceOriginTrace) :
-    trace ∈ insertSourceOriginTrace trace₀ traces ↔
-      trace = trace₀ ∨ trace ∈ traces := by
-  induction traces with
-  | nil =>
-      simp [insertSourceOriginTrace]
-  | cons head tail ih =>
-      cases hcmp : compare trace₀ head with
-      | lt =>
-          simp [insertSourceOriginTrace, hcmp]
-      | eq =>
-          have hEq : trace₀ = head := by
-            exact (Std.LawfulEqOrd.compare_eq_iff_eq (a := trace₀) (b := head)).mp hcmp
-          constructor
-          · intro h
-            simp [insertSourceOriginTrace, hEq] at h
-            rcases h with h | h
-            · exact Or.inl (h.trans hEq.symm)
-            · exact Or.inr (by simp [h])
-          · intro h
-            rcases h with h | h
-            · simp [insertSourceOriginTrace, hEq, h]
-            · simpa [insertSourceOriginTrace, hEq] using h
-      | gt =>
-          simp [insertSourceOriginTrace, hcmp, ih, or_left_comm]
-
-private theorem mem_canonicalSourceOriginSet
-    (trace : SourceOriginTrace) :
-    trace ∈ canonicalSourceOriginSet traces ↔ trace ∈ traces := by
-  induction traces with
-  | nil =>
-      simp [canonicalSourceOriginSet]
-  | cons trace₀ traces ih =>
-      rw [canonicalSourceOriginSet]
-      rw [mem_insertSourceOriginTrace]
-      simp [ih]
-
-private theorem mem_mergeCanonicalSourceOriginSets
-    (trace : SourceOriginTrace) :
-    trace ∈ mergeCanonicalSourceOriginSets left right ↔
-      trace ∈ left ∨ trace ∈ right := by
-  simp [mergeCanonicalSourceOriginSets, mem_canonicalSourceOriginSet, List.mem_append]
-
-private theorem mem_prefixCanonicalSourceOriginSet
-    (tag : SourceBranchTag)
-    (trace : SourceOriginTrace) :
-    trace ∈ prefixCanonicalSourceOriginSet tag origins ↔
-      ∃ trace', trace = tag :: trace' ∧ trace' ∈ origins := by
-  simp [prefixCanonicalSourceOriginSet, mem_canonicalSourceOriginSet, List.mem_map]
-  constructor
-  · rintro ⟨trace', hmem, rfl⟩
-    exact ⟨trace', rfl, hmem⟩
-  · rintro ⟨trace', rfl, hmem⟩
-    exact ⟨trace', hmem, rfl⟩
-
-inductive CallableFacetOrigin : GTy -> CallableFacet -> Prop where
-  | callable :
-      CallableFacetOrigin (.callable P R)
-        { paramTy := P, returnTy := R }
-  | union_left :
-      CallableFacetOrigin G f ->
-      CallableFacetOrigin (.union G H) f
-  | union_right :
-      CallableFacetOrigin H f ->
-      CallableFacetOrigin (.union G H) f
-  | inter_left :
-      CallableFacetOrigin G f ->
-      CallableFacetOrigin (.intersection G H) f
-  | inter_right :
-      CallableFacetOrigin H f ->
-      CallableFacetOrigin (.intersection G H) f
-
-inductive CallableFacetOriginTrace : GTy -> CallableFacet -> SourceOriginTrace -> Prop where
-  | callable :
-      CallableFacetOriginTrace
-        (.callable P R)
-        { paramTy := P, returnTy := R }
-        []
-  | union_left :
-      CallableFacetOriginTrace G f trace ->
-      CallableFacetOriginTrace (.union G H) f (.left :: trace)
-  | union_right :
-      CallableFacetOriginTrace H f trace ->
-      CallableFacetOriginTrace (.union G H) f (.right :: trace)
-  | inter_left :
-      CallableFacetOriginTrace G f trace ->
-      CallableFacetOriginTrace (.intersection G H) f (.left :: trace)
-  | inter_right :
-      CallableFacetOriginTrace H f trace ->
-      CallableFacetOriginTrace (.intersection G H) f (.right :: trace)
-
-theorem callableFacetOrigin_of_trace
-    (h : CallableFacetOriginTrace G f trace) :
-    CallableFacetOrigin G f := by
-  induction h with
-  | callable =>
-      exact .callable
-  | union_left _ ih =>
-      exact .union_left ih
-  | union_right _ ih =>
-      exact .union_right ih
-  | inter_left _ ih =>
-      exact .inter_left ih
-  | inter_right _ ih =>
-      exact .inter_right ih
-
-theorem callableFacetOrigin_has_trace
-    (h : CallableFacetOrigin G f) :
-    ∃ trace, CallableFacetOriginTrace G f trace := by
-  induction h with
-  | callable =>
-      exact ⟨[], .callable⟩
-  | union_left h ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.left :: trace, .union_left htrace⟩
-  | union_right h ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.right :: trace, .union_right htrace⟩
-  | inter_left h ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.left :: trace, .inter_left htrace⟩
-  | inter_right h ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.right :: trace, .inter_right htrace⟩
-
-inductive AttrResultOrigin (gct : GClassTable) (attr : Identifier) : GTy → GTy → Prop where
-  | any :
-      AttrResultOrigin gct attr .any .any
-  | class_ :
-      FindGMethodType gct C attr P R →
-      AttrResultOrigin gct attr (.class_ C) (.callable P R)
-  | callable :
-      FindGMethodType gct boundMethodClass attr P R →
-      AttrResultOrigin gct attr (.callable P₀ R₀) (.callable P R)
-  | union_left :
-      AttrResultOrigin gct attr G R →
-      AttrResultOrigin gct attr (.union G H) R
-  | union_right :
-      AttrResultOrigin gct attr H R →
-      AttrResultOrigin gct attr (.union G H) R
-  | inter_left :
-      AttrResultOrigin gct attr G R →
-      AttrResultOrigin gct attr (.intersection G H) R
-  | inter_right :
-      AttrResultOrigin gct attr H R →
-      AttrResultOrigin gct attr (.intersection G H) R
-  | bottom :
-      AttrResultOrigin gct attr .bottom .bottom
-
-inductive AttrResultOriginTrace
-    (gct : GClassTable) (attr : Identifier) :
-    GTy → GTy → SourceOriginTrace → Prop where
-  | any :
-      AttrResultOriginTrace gct attr .any .any []
-  | class_ :
-      FindGMethodType gct C attr P R →
-      AttrResultOriginTrace gct attr (.class_ C) (.callable P R) []
-  | callable :
-      FindGMethodType gct boundMethodClass attr P R →
-      AttrResultOriginTrace gct attr (.callable P₀ R₀) (.callable P R) []
-  | union_left :
-      AttrResultOriginTrace gct attr G R trace →
-      AttrResultOriginTrace gct attr (.union G H) R (.left :: trace)
-  | union_right :
-      AttrResultOriginTrace gct attr H R trace →
-      AttrResultOriginTrace gct attr (.union G H) R (.right :: trace)
-  | inter_left :
-      AttrResultOriginTrace gct attr G R trace →
-      AttrResultOriginTrace gct attr (.intersection G H) R (.left :: trace)
-  | inter_right :
-      AttrResultOriginTrace gct attr H R trace →
-      AttrResultOriginTrace gct attr (.intersection G H) R (.right :: trace)
-  | bottom :
-      AttrResultOriginTrace gct attr .bottom .bottom []
-
-theorem attrResultOrigin_of_trace
-    (h : AttrResultOriginTrace gct attr G R trace) :
-    AttrResultOrigin gct attr G R := by
-  induction h with
-  | any =>
-      exact .any
-  | class_ hfind =>
-      exact .class_ hfind
-  | callable hfind =>
-      exact .callable hfind
-  | union_left _ ih =>
-      exact .union_left ih
-  | union_right _ ih =>
-      exact .union_right ih
-  | inter_left _ ih =>
-      exact .inter_left ih
-  | inter_right _ ih =>
-      exact .inter_right ih
-  | bottom =>
-      exact .bottom
-
-theorem attrResultOrigin_has_trace
-    (h : AttrResultOrigin gct attr G R) :
-    ∃ trace, AttrResultOriginTrace gct attr G R trace := by
-  induction h with
-  | any =>
-      exact ⟨[], .any⟩
-  | class_ hfind =>
-      exact ⟨[], .class_ hfind⟩
-  | callable hfind =>
-      exact ⟨[], .callable hfind⟩
-  | union_left _ ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.left :: trace, .union_left htrace⟩
-  | union_right _ ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.right :: trace, .union_right htrace⟩
-  | inter_left _ ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.left :: trace, .inter_left htrace⟩
-  | inter_right _ ih =>
-      rcases ih with ⟨trace, htrace⟩
-      exact ⟨.right :: trace, .inter_right htrace⟩
-  | bottom =>
-      exact ⟨[], .bottom⟩
-
-inductive SourceOperatorInputCorrespondence : GTy → GTy → Prop where
-  | any :
-      SourceOperatorInputCorrespondence .any .any
-  | class_ :
-      SourceOperatorInputCorrespondence (.class_ C) (.class_ C)
-  | callable :
-      SourceOperatorInputCorrespondence P₁ P₂ →
-      SourceOperatorInputCorrespondence R₁ R₂ →
-      SourceOperatorInputCorrespondence (.callable P₁ R₁) (.callable P₂ R₂)
-  | union :
-      SourceOperatorInputCorrespondence G₁ G₂ →
-      SourceOperatorInputCorrespondence H₁ H₂ →
-      SourceOperatorInputCorrespondence (.union G₁ H₁) (.union G₂ H₂)
-  | intersection :
-      SourceOperatorInputCorrespondence G₁ G₂ →
-      SourceOperatorInputCorrespondence H₁ H₂ →
-      SourceOperatorInputCorrespondence (.intersection G₁ H₁) (.intersection G₂ H₂)
-  | bottom :
-      SourceOperatorInputCorrespondence .bottom .bottom
-  | negClass :
-      SourceOperatorInputCorrespondence (.negClass C) (.negClass C)
-
-theorem sourceOperatorInputCorrespondence_refl
-    (G : GTy) :
-    SourceOperatorInputCorrespondence G G := by
-  induction G with
-  | any =>
-      exact .any
-  | class_ =>
-      exact .class_
-  | callable _ _ ihP ihR =>
-      exact .callable ihP ihR
-  | union _ _ ihG ihH =>
-      exact .union ihG ihH
-  | intersection _ _ ihG ihH =>
-      exact .intersection ihG ihH
-  | bottom =>
-      exact .bottom
-  | negClass =>
-      exact .negClass
-
-inductive SourceOperatorInputAlignment : GTy → GTy → Prop where
-  | any :
-      SourceOperatorInputAlignment .any .any
-  | toAny :
-      SourceOperatorInputAlignment G .any
-  | class_ :
-      SourceOperatorInputAlignment (.class_ C) (.class_ C)
-  | callable :
-      SourceOperatorInputAlignment P₁ P₂ →
-      SourceOperatorInputAlignment R₁ R₂ →
-      SourceOperatorInputAlignment (.callable P₁ R₁) (.callable P₂ R₂)
-  | union :
-      SourceOperatorInputAlignment G₁ G₂ →
-      SourceOperatorInputAlignment H₁ H₂ →
-      SourceOperatorInputAlignment (.union G₁ H₁) (.union G₂ H₂)
-  | intersection :
-      SourceOperatorInputAlignment G₁ G₂ →
-      SourceOperatorInputAlignment H₁ H₂ →
-      SourceOperatorInputAlignment (.intersection G₁ H₁) (.intersection G₂ H₂)
-  | bottom :
-      SourceOperatorInputAlignment .bottom .bottom
-  | negClass :
-      SourceOperatorInputAlignment (.negClass C) (.negClass C)
-
-theorem sourceOperatorInputAlignment_refl
-    (G : GTy) :
-    SourceOperatorInputAlignment G G := by
-  induction G with
-  | any =>
-      exact .any
-  | class_ =>
-      exact .class_
-  | callable _ _ ihP ihR =>
-      exact .callable ihP ihR
-  | union _ _ ihG ihH =>
-      exact .union ihG ihH
-  | intersection _ _ ihG ihH =>
-      exact .intersection ihG ihH
-  | bottom =>
-      exact .bottom
-  | negClass =>
-      exact .negClass
-
-theorem sourceOperatorInputAlignment_of_correspondence
-    (h : SourceOperatorInputCorrespondence G₁ G₂) :
-    SourceOperatorInputAlignment G₁ G₂ := by
-  induction h with
-  | any =>
-      exact .any
-  | class_ =>
-      exact .class_
-  | callable _ _ ihP ihR =>
-      exact .callable ihP ihR
-  | union _ _ ihG ihH =>
-      exact .union ihG ihH
-  | intersection _ _ ihG ihH =>
-      exact .intersection ihG ihH
-  | bottom =>
-      exact .bottom
-  | negClass =>
-      exact .negClass
-
-private theorem sourceOperatorInputAlignment_of_structuralTargetPrecision
-    (h : StructuralTargetPrecision G₁ G₂) :
-    SourceOperatorInputAlignment G₁ G₂ := by
-  induction h with
-  | refl =>
-      exact sourceOperatorInputAlignment_refl _
-  | toAny =>
-      exact .toAny
-  | callable _ _ ihP ihR =>
-      exact .callable ihP ihR
-  | union _ _ ihG ihH =>
-      exact .union ihG ihH
-  | intersection _ _ ihG ihH =>
-      exact .intersection ihG ihH
-
-theorem sourceOperatorInputAlignment_of_annotationTargetPrecision
-    (h : AnnotationTargetPrecision G₁ G₂) :
-    SourceOperatorInputAlignment G₁ G₂ :=
-  sourceOperatorInputAlignment_of_structuralTargetPrecision
-    (structuralTargetPrecision_of_annotationTargetPrecision h)
-
+  /-- The source type permits no callable value. -/
+  | bottom
+  /-- One input and result type pair. -/
+  | leaf : CallableFacet gct -> CallableSummary gct
+  /-- The function can have either type. Both alternatives must permit the call. -/
+  | union : CallableSummary gct -> CallableSummary gct -> CallableSummary gct
+  /-- The same function satisfies both sets of type requirements. -/
+  | intersection : CallableSummary gct -> CallableSummary gct -> CallableSummary gct
 
 /-! ## Call Typing -/
 
-def calleeSummarySrc (gct : GClassTable) : GTy → CallableSummary
-  | .any => .tainted
-  | .class_ _ => .empty
-  | .callable P R => .leaf { paramTy := P, returnTy := R }
-  | .union G H => .union (calleeSummarySrc gct G) (calleeSummarySrc gct H)
-  | .intersection G H => .intersection (calleeSummarySrc gct G) (calleeSummarySrc gct H)
-  | .bottom => .empty
-  | .negClass _ => .empty
+/-- Extract the input and result requirements that can apply to a callable value.
+A source type can combine function requirements with class types and exclusions,
+called class literals. The summary tests each name against BoundMethod's MRO.
+Outside that MRO, sealing makes BoundMethod & C bottom; inside it, inheritance
+and class contradiction make BoundMethod & negClass C bottom. These literals
+rule out every callable value, so their summary is `.bottom`.
 
-def mergeCallUnionResult : Option GTy → Option GTy → Option GTy
-  | some left, some right => some (.union left right)
-  | _, _ => none
+For the remaining literals, inheritance gives BoundMethod & C ≈ BoundMethod when
+C is in its MRO. Sealing and the class complement equations give
+BoundMethod & negClass C ≈ BoundMethod when C is outside its MRO. These literals
+add no parameter or result annotation, so their summary is `.empty`. Function
+types and `any` supply those requirements. Object also admits ordinary objects,
+so `callSourceTy?` checks acceptance using the full callee type. -/
+private def calleeSummarySrc (gct : GClassTable) (hwfct : WellFormedGClassTableCore gct) :
+    (type : GTy) → WellFormedGTy gct type → CallableSummary gct
+  | .any, _ => .leaf ⟨.any, .any⟩
+  | .class_ name, _ =>
+      if name ∈ hwfct.raw.boundMethodExists.mro then .empty else .bottom
+  | .callable P R, valid =>
+      .leaf ⟨⟨P, by cases valid with | callable input _ => exact input⟩,
+        ⟨R, by cases valid with | callable _ result => exact result⟩⟩
+  | .union G H, valid =>
+      let leftValid : WellFormedGTy gct G := by cases valid with | union left _ => exact left
+      let rightValid : WellFormedGTy gct H := by cases valid with | union _ right => exact right
+      match calleeSummarySrc gct hwfct G leftValid, calleeSummarySrc gct hwfct H rightValid with
+      | .bottom, other => other
+      | other, .bottom => other
+      | left, right => .union left right
+  | .intersection G H, valid =>
+      let leftValid : WellFormedGTy gct G := by cases valid with | intersection left _ => exact left
+      let rightValid : WellFormedGTy gct H := by cases valid with | intersection _ right => exact right
+      match calleeSummarySrc gct hwfct G leftValid, calleeSummarySrc gct hwfct H rightValid with
+      | .bottom, _ | _, .bottom => .bottom
+      | left, right => .intersection left right
+  | .bottom, _ => .bottom
+  | .negClass name, _ =>
+      if name ∈ hwfct.raw.boundMethodExists.mro then .bottom else .empty
 
-def mergeCallIntersectionResult : Option GTy → Option GTy → Option GTy
-  | none, none => none
-  | some result, none => some result
-  | none, some result => some result
-  | some _, some _ => some .any
+/-- Apply a union or intersection without copying exactly equal operands. -/
+private def combineCallTypes (combine : WellFormedGradualType gct → WellFormedGradualType gct → WellFormedGradualType gct)
+    (left right : WellFormedGradualType gct) : WellFormedGradualType gct :=
+  if left = right then left else combine left right
 
-private theorem callableSummaryOk_leaf_inv
-    (hsum : CallableSummaryOk gct (.leaf f)) :
-    CallableFacetOk gct f := by
-  cases hsum with
-  | leaf hfacet =>
-      exact hfacet
-
-private theorem callableSummaryOk_union_inv
-    (hsum : CallableSummaryOk gct (.union s t)) :
-    CallableSummaryOk gct s ∧ CallableSummaryOk gct t := by
-  cases hsum with
-  | union hs ht =>
-      exact ⟨hs, ht⟩
-
-private theorem callableSummaryOk_intersection_inv
-    (hsum : CallableSummaryOk gct (.intersection s t)) :
-    CallableSummaryOk gct s ∧ CallableSummaryOk gct t := by
-  cases hsum with
-  | intersection hs ht =>
-      exact ⟨hs, ht⟩
-
-def callSourceTy? (gct : GClassTable) {s : CallableSummary} {argTy : GTy}
-    (hwfct : WellFormedGClassTableCore gct)
-    (hsum : CallableSummaryOk gct s)
-    (hwfArg : WellFormedGTy gct argTy) : Option GTy :=
+/-- List the function's input and result requirements.
+An intersection can accept an argument through several requirements together.
+Include the individual requirements and their nonempty combinations.
+If only one input overlaps the argument upper bound, use that pair directly.
+If neither overlaps, retain the right pair; its empty overlap adds no reachable result.
+A union can select either function, so each pair must cover both alternatives.
+An unknown callee part gives `any -> any`; it can add a result restriction.
+A summary with no callable values gives `any -> bottom`. -/
+private def callFacetCandidates (hwfct : WellFormedGClassTableCore gct)
+    (argument : WellFormedType ((eraseClassTable gct).map ClassDecl.name))
+    (s : CallableSummary gct) : List (CallableFacet gct) :=
   match s with
-  | .tainted =>
-      some .any
-  | .empty =>
-      none
-  | .leaf f =>
-      have hfacet : CallableFacetOk gct f := callableSummaryOk_leaf_inv hsum
-      have hwfParam : WellFormedGTy gct f.paramTy := hfacet.2.1
-      haveI : Decidable (AssignableTo gct argTy f.paramTy) :=
-        assignableTo_decidable hwfct hwfArg hwfParam
-      if AssignableTo gct argTy f.paramTy then some f.returnTy else none
-  | .union s₁ s₂ =>
-      let hchildren := callableSummaryOk_union_inv hsum
-      mergeCallUnionResult
-        (callSourceTy? (gct := gct) (s := s₁) (argTy := argTy) hwfct hchildren.1 hwfArg)
-        (callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hchildren.2 hwfArg)
-  | .intersection s₁ s₂ =>
-      let hchildren := callableSummaryOk_intersection_inv hsum
-      mergeCallIntersectionResult
-        (callSourceTy? (gct := gct) (s := s₁) (argTy := argTy) hwfct hchildren.1 hwfArg)
-        (callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hchildren.2 hwfArg)
+  | .empty => []
+  | .bottom => [⟨.any, .bottom⟩]
+  | .leaf f => [f]
+  | .union left right =>
+      let leftCandidates := callFacetCandidates hwfct argument left
+      let rightCandidates := callFacetCandidates hwfct argument right
+      (leftCandidates.flatMap (fun l => rightCandidates.map (fun r => {
+        paramTy := combineCallTypes WellFormedGradualType.intersection l.paramTy r.paramTy,
+        returnTy := combineCallTypes WellFormedGradualType.union l.returnTy r.returnTy }))).eraseDups
+  | .intersection left right =>
+      let leftCandidates := callFacetCandidates hwfct argument left
+      let rightCandidates := callFacetCandidates hwfct argument right
+      (leftCandidates ++ rightCandidates ++
+        leftCandidates.flatMap (fun l => rightCandidates.map (combineIntersection l))).eraseDups
+where
+  /-- Combine two input requirements that overlap the argument upper bound.
+  If only one input overlaps, use its pair directly.
+  If neither overlaps, retain the right pair; no argument value can select it. -/
+  combineIntersection (left right : CallableFacet gct) : CallableFacet gct :=
+    let leftInput := WellFormedType.intersection argument
+      (upperBoundType hwfct.toWellFormedClassHierarchy left.paramTy.wellFormed)
+    let rightInput := WellFormedType.intersection argument
+      (upperBoundType hwfct.toWellFormedClassHierarchy right.paramTy.wellFormed)
+    haveI : Decidable (IsSubtype hwfct.toWellFormedClassHierarchy leftInput.raw .bottom) :=
+      WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy leftInput .bottom
+    haveI : Decidable (IsSubtype hwfct.toWellFormedClassHierarchy rightInput.raw .bottom) :=
+      WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy rightInput .bottom
+    if IsSubtype hwfct.toWellFormedClassHierarchy leftInput.raw .bottom then right
+    else if IsSubtype hwfct.toWellFormedClassHierarchy rightInput.raw .bottom then left
+    else ⟨combineCallTypes WellFormedGradualType.union left.paramTy right.paramTy,
+      combineCallTypes WellFormedGradualType.union left.returnTy right.returnTy⟩
 
-inductive CallResultWitness (gct : GClassTable) (argTy : GTy) :
-    CallableSummary → Option GTy → Prop where
-  | tainted :
-      CallResultWitness gct argTy .tainted (some .any)
-  | empty :
-      CallResultWitness gct argTy .empty none
-  | leaf_hit
-      (happ : AssignableTo gct argTy f.paramTy) :
-      CallResultWitness gct argTy (.leaf f) (some f.returnTy)
-  | leaf_miss
-      (hmiss : ¬ AssignableTo gct argTy f.paramTy) :
-      CallResultWitness gct argTy (.leaf f) none
-  | union_some
-      (hleft : CallResultWitness gct argTy s (some left))
-      (hright : CallResultWitness gct argTy t (some right)) :
-      CallResultWitness gct argTy (.union s t) (some (.union left right))
-  | union_none_left
-      (hleft : CallResultWitness gct argTy s none)
-      (hright : CallResultWitness gct argTy t resultT) :
-      CallResultWitness gct argTy (.union s t) none
-  | union_none_right
-      (hleft : CallResultWitness gct argTy s (some left))
-      (hright : CallResultWitness gct argTy t none) :
-      CallResultWitness gct argTy (.union s t) none
-  | inter_none
-      (hleft : CallResultWitness gct argTy s none)
-      (hright : CallResultWitness gct argTy t none) :
-      CallResultWitness gct argTy (.intersection s t) none
-  | inter_left
-      (hleft : CallResultWitness gct argTy s (some result))
-      (hright : CallResultWitness gct argTy t none) :
-      CallResultWitness gct argTy (.intersection s t) (some result)
-  | inter_right
-      (hleft : CallResultWitness gct argTy s none)
-      (hright : CallResultWitness gct argTy t (some result)) :
-      CallResultWitness gct argTy (.intersection s t) (some result)
-  | inter_both
-      (hleft : CallResultWitness gct argTy s (some left))
-      (hright : CallResultWitness gct argTy t (some right)) :
-      CallResultWitness gct argTy (.intersection s t) (some .any)
+/-- Detect an unknown type anywhere inside a function input.
+Such unknown inputs can change which result requirements apply after materialization.
+Bounds alone do not preserve that information. -/
+private def GTy.hasUnknownFunctionInput : GTy → Bool
+  | .callable parameter result => containsAny parameter || result.hasUnknownFunctionInput
+  | .union left right | .intersection left right =>
+      left.hasUnknownFunctionInput || right.hasUnknownFunctionInput
+  | _ => false
+where
+  /-- Detect unknown type information in an input annotation. -/
+  containsAny : GTy → Bool
+    | .any => true
+    | .callable left right | .union left right | .intersection left right =>
+        containsAny left || containsAny right
+    | _ => false
 
-theorem callSourceTy?_of_witness
-    {hwfct : WellFormedGClassTableCore gct}
-    {hsum : CallableSummaryOk gct s}
-    {hwfArg : WellFormedGTy gct argTy}
-    (hw : CallResultWitness gct argTy s result) :
-    callSourceTy? (gct := gct) (s := s) (argTy := argTy) hwfct hsum hwfArg = result := by
-  induction hw with
-  | tainted =>
-      simp [callSourceTy?]
-  | empty =>
-      simp [callSourceTy?]
-  | leaf_hit happ =>
-      rename_i f
-      have hfacet : CallableFacetOk gct f := callableSummaryOk_leaf_inv hsum
-      have hwfParam : WellFormedGTy gct f.paramTy := hfacet.2.1
-      haveI : Decidable (AssignableTo gct argTy f.paramTy) :=
-        assignableTo_decidable hwfct hwfArg hwfParam
-      simp [callSourceTy?, happ]
-  | leaf_miss hmiss =>
-      rename_i f
-      have hfacet : CallableFacetOk gct f := callableSummaryOk_leaf_inv hsum
-      have hwfParam : WellFormedGTy gct f.paramTy := hfacet.2.1
-      haveI : Decidable (AssignableTo gct argTy f.paramTy) :=
-        assignableTo_decidable hwfct hwfArg hwfParam
-      simp [callSourceTy?, hmiss]
-  | union_some _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallUnionResult,
-        ihLeft (hsum := (callableSummaryOk_union_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_union_inv hsum).2)]
-  | union_none_left _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallUnionResult,
-        ihLeft (hsum := (callableSummaryOk_union_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_union_inv hsum).2)]
-  | union_none_right _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallUnionResult,
-        ihLeft (hsum := (callableSummaryOk_union_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_union_inv hsum).2)]
-  | inter_none _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallIntersectionResult,
-        ihLeft (hsum := (callableSummaryOk_intersection_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_intersection_inv hsum).2)]
-  | inter_left _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallIntersectionResult,
-        ihLeft (hsum := (callableSummaryOk_intersection_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_intersection_inv hsum).2)]
-  | inter_right _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallIntersectionResult,
-        ihLeft (hsum := (callableSummaryOk_intersection_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_intersection_inv hsum).2)]
-  | inter_both _ _ ihLeft ihRight =>
-      simp [callSourceTy?, mergeCallIntersectionResult,
-        ihLeft (hsum := (callableSummaryOk_intersection_inv hsum).1),
-        ihRight (hsum := (callableSummaryOk_intersection_inv hsum).2)]
+/-- Compare the bounds of valid gradual packages without checking their names again. -/
+private def WellFormedGradualType.boundsSubtypeDecidable
+    (hwfct : WellFormedGClassTableCore gct) (source target : WellFormedGradualType gct) :
+    Decidable (BoundsSubtype gct hwfct.toWellFormedClassHierarchy source.raw target.raw) := by
+  unfold BoundsSubtype
+  let structural := hwfct.toWellFormedClassHierarchy
+  exact @instDecidableAnd _ _
+    (WellFormedType.subtypeDecidable structural
+      (lowerBoundType structural source.wellFormed) (lowerBoundType structural target.wellFormed))
+    (WellFormedType.subtypeDecidable structural
+      (upperBoundType structural source.wellFormed) (upperBoundType structural target.wellFormed))
 
-theorem callSourceTy?_witness_of
-    {hwfct : WellFormedGClassTableCore gct}
-    {hsum : CallableSummaryOk gct s}
-    {hwfArg : WellFormedGTy gct argTy}
-    (hcall : callSourceTy? (gct := gct) (s := s) (argTy := argTy) hwfct hsum hwfArg = result) :
-    CallResultWitness gct argTy s result := by
-  induction s generalizing result with
-  | tainted =>
-      cases hsum
-      simp [callSourceTy?] at hcall
-      cases hcall
-      exact .tainted
-  | empty =>
-      cases hsum
-      simp [callSourceTy?] at hcall
-      cases hcall
-      exact .empty
-  | leaf f =>
-      cases hsum with
-      | leaf hfacet =>
-          have hwfParam : WellFormedGTy gct f.paramTy := hfacet.2.1
-          haveI : Decidable (AssignableTo gct argTy f.paramTy) :=
-            assignableTo_decidable hwfct hwfArg hwfParam
-          by_cases happ : AssignableTo gct argTy f.paramTy
-          · simp [callSourceTy?, happ] at hcall
-            cases hcall
-            exact .leaf_hit happ
-          · simp [callSourceTy?, happ] at hcall
-            cases hcall
-            exact .leaf_miss happ
-  | union s₁ s₂ ih₁ ih₂ =>
-      cases hsum with
-      | union hsum₁ hsum₂ =>
-          cases hleft :
-              callSourceTy? (gct := gct) (s := s₁) (argTy := argTy) hwfct hsum₁ hwfArg with
-          | none =>
-              have hwLeft : CallResultWitness gct argTy s₁ none :=
-                ih₁ (hsum := hsum₁) hleft
-              cases hright :
-                  callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hsum₂ hwfArg with
-              | none =>
-                  have hwRight : CallResultWitness gct argTy s₂ none :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallUnionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .union_none_left hwLeft hwRight
-              | some right =>
-                  have hwRight : CallResultWitness gct argTy s₂ (some right) :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallUnionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .union_none_left hwLeft hwRight
-          | some left =>
-              have hwLeft : CallResultWitness gct argTy s₁ (some left) :=
-                ih₁ (hsum := hsum₁) hleft
-              cases hright :
-                  callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hsum₂ hwfArg with
-              | none =>
-                  have hwRight : CallResultWitness gct argTy s₂ none :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallUnionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .union_none_right hwLeft hwRight
-              | some right =>
-                  have hwRight : CallResultWitness gct argTy s₂ (some right) :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallUnionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .union_some hwLeft hwRight
-  | intersection s₁ s₂ ih₁ ih₂ =>
-      cases hsum with
-      | intersection hsum₁ hsum₂ =>
-          cases hleft :
-              callSourceTy? (gct := gct) (s := s₁) (argTy := argTy) hwfct hsum₁ hwfArg with
-          | none =>
-              have hwLeft : CallResultWitness gct argTy s₁ none :=
-                ih₁ (hsum := hsum₁) hleft
-              cases hright :
-                  callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hsum₂ hwfArg with
-              | none =>
-                  have hwRight : CallResultWitness gct argTy s₂ none :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallIntersectionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .inter_none hwLeft hwRight
-              | some right =>
-                  have hwRight : CallResultWitness gct argTy s₂ (some right) :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallIntersectionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .inter_right hwLeft hwRight
-          | some left =>
-              have hwLeft : CallResultWitness gct argTy s₁ (some left) :=
-                ih₁ (hsum := hsum₁) hleft
-              cases hright :
-                  callSourceTy? (gct := gct) (s := s₂) (argTy := argTy) hwfct hsum₂ hwfArg with
-              | none =>
-                  have hwRight : CallResultWitness gct argTy s₂ none :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallIntersectionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .inter_left hwLeft hwRight
-              | some right =>
-                  have hwRight : CallResultWitness gct argTy s₂ (some right) :=
-                    ih₂ (hsum := hsum₂) hright
-                  simp [callSourceTy?, mergeCallIntersectionResult, hleft, hright] at hcall
-                  cases hcall
-                  exact .inter_both hwLeft hwRight
+/-- Compare the bounds intervals of two valid gradual packages without checking their names again. -/
+private def WellFormedGradualType.moreStaticDecidable
+    (hwfct : WellFormedGClassTableCore gct) (source target : WellFormedGradualType gct) :
+    Decidable (MoreStatic gct hwfct.toWellFormedClassHierarchy source.raw target.raw) := by
+  unfold MoreStatic
+  let structural := hwfct.toWellFormedClassHierarchy
+  exact @instDecidableAnd _ _
+    (WellFormedType.subtypeDecidable structural
+      (lowerBoundType structural target.wellFormed) (lowerBoundType structural source.wellFormed))
+    (WellFormedType.subtypeDecidable structural
+      (upperBoundType structural source.wellFormed) (upperBoundType structural target.wellFormed))
 
-theorem callSourceTy?_witness_result_eq
-    {hwfct : WellFormedGClassTableCore gct}
-    {hsum : CallableSummaryOk gct s}
-    {hwfArg : WellFormedGTy gct argTy}
-    (hw₁ : CallResultWitness gct argTy s result₁)
-    (hw₂ : CallResultWitness gct argTy s result₂) :
-    result₁ = result₂ := by
-  rw [← callSourceTy?_of_witness (hwfct := hwfct) (hsum := hsum) (hwfArg := hwfArg) hw₁]
-  rw [← callSourceTy?_of_witness (hwfct := hwfct) (hsum := hsum) (hwfArg := hwfArg) hw₂]
+/-- Intersect result requirements that apply to the same input.
+Keep equal results unchanged.
+Use bounds to omit a distinct part only when neither type has an unknown function input.
+Otherwise retain both requirements, including their separate materializations. -/
+private def mergeCallResults (hwfct : WellFormedGClassTableCore gct)
+    (left right : WellFormedGradualType gct) : WellFormedGradualType gct :=
+  if left = right then left
+  else if left.raw.hasUnknownFunctionInput || right.raw.hasUnknownFunctionInput then .intersection left right
+  else
+    haveI := WellFormedGradualType.boundsSubtypeDecidable hwfct left right
+    if BoundsSubtype gct hwfct.toWellFormedClassHierarchy left.raw right.raw then left
+    else
+      haveI := WellFormedGradualType.boundsSubtypeDecidable hwfct right left
+      if BoundsSubtype gct hwfct.toWellFormedClassHierarchy right.raw left.raw then right
+      else .intersection left right
 
-theorem callableSummaryOk_calleeSummarySrc
-    (hsrc : SourceCallableTy gct G)
-    (hwf : WellFormedGTy gct G) :
-    CallableSummaryOk gct (calleeSummarySrc gct G) := by
-  induction hsrc with
-  | any =>
-      cases hwf
-      exact .tainted
-  | class_ =>
-      cases hwf
-      exact .empty
-  | callable hP hR ihP =>
-      cases hwf with
-      | callable hwfP hwfR =>
-          exact
-            .leaf
-              ⟨hP, hwfP, runtimePublicAnnotation_to_sourceCallableTy _ hR, hwfR⟩
-  | union hG hH ihG ihH =>
-      cases hwf with
-      | union hwfG hwfH =>
-          exact .union (ihG hwfG) (ihH hwfH)
-  | intersection hG hH ihG ihH =>
-      cases hwf with
-      | intersection hwfG hwfH =>
-          exact .intersection (ihG hwfG) (ihH hwfH)
-  | bottom =>
-      cases hwf
-      exact .empty
-  | negClass =>
-      cases hwf
-      exact .empty
+/-- Fold results in list order, leaving an empty list without a selected result. -/
+private def foldCallResults {α : Type} (combine : α → α → α) (results : List α) : Option α :=
+  results.foldr (fun result retained =>
+    some (match retained with
+      | none => result
+      | some other => combine result other)) none
 
-private theorem calleeSummarySrc_transport :
-    calleeSummarySrc gct₁ G = calleeSummarySrc gct₂ G := by
-  induction G <;> simp [calleeSummarySrc, *]
+/-- Decide whether another result covers this result's bounds interval.
+Equal types need no approximation. For distinct types, both must have known function inputs.
+Unknown function inputs can change which requirements apply after materialization. -/
+private def callResultCoveredBy (hwfct : WellFormedGClassTableCore gct)
+    (result other : WellFormedGradualType gct) : Bool :=
+  result == other ||
+    if result.raw.hasUnknownFunctionInput || other.raw.hasUnknownFunctionInput then false
+    else
+      haveI := WellFormedGradualType.moreStaticDecidable hwfct result other
+      decide (MoreStatic gct hwfct.toWellFormedClassHierarchy result.raw other.raw)
 
-private theorem callResultWitness_transport
-    (hct : ClassTableAnnotationPrecision gct₁ gct₂)
-    (hw : CallResultWitness gct₁ argTy s result) :
-    CallResultWitness gct₂ argTy s result := by
-  induction hw with
-  | tainted =>
-      exact .tainted
-  | empty =>
-      exact .empty
-  | leaf_hit happ =>
-      exact .leaf_hit ((assignableTo_transport hct).mp happ)
-  | leaf_miss hmiss =>
-      exact
-        .leaf_miss (by
-          intro happ₂
-          exact hmiss ((assignableTo_transport hct).mpr happ₂))
-  | union_some _ _ ihLeft ihRight =>
-      exact .union_some ihLeft ihRight
-  | union_none_left _ _ ihLeft ihRight =>
-      exact .union_none_left ihLeft ihRight
-  | union_none_right _ _ ihLeft ihRight =>
-      exact .union_none_right ihLeft ihRight
-  | inter_none _ _ ihLeft ihRight =>
-      exact .inter_none ihLeft ihRight
-  | inter_left _ _ ihLeft ihRight =>
-      exact .inter_left ihLeft ihRight
-  | inter_right _ _ ihLeft ihRight =>
-      exact .inter_right ihLeft ihRight
-  | inter_both _ _ ihLeft ihRight =>
-      exact .inter_both ihLeft ihRight
+/-- Combine results from different argument materializations.
+Remove duplicate results and bounds intervals covered by another retained result.
+Build one approximation from all retained results: their intersection, or an unknown
+part limited to their union. Each retained result occurs twice in the final type.
+A single retained result needs no approximation. -/
+private def combineCallResults (hwfct : WellFormedGClassTableCore gct)
+    (results : List (WellFormedGradualType gct)) : Option (WellFormedGradualType gct) :=
+  match retain results with
+  | [] => none
+  | [result] => some result
+  | retained =>
+      (foldCallResults WellFormedGradualType.intersection retained).bind fun intersection =>
+        (foldCallResults WellFormedGradualType.union retained).map fun union =>
+          .union intersection (.intersection .any union)
+where
+  /-- Drop a result when another retained result has a strictly wider interval.
+  Otherwise keep the first occurrence and remove equal or narrower retained intervals. -/
+  retain : List (WellFormedGradualType gct) → List (WellFormedGradualType gct)
+    | [] => []
+    | result :: rest =>
+        let retained := retain rest
+        if retained.any (fun other => callResultCoveredBy hwfct result other &&
+            !callResultCoveredBy hwfct other result) then retained
+        else result :: retained.filter (fun other => !callResultCoveredBy hwfct other result)
 
-private theorem callResultWitness_callable_and_wf
-    (hsum : CallableSummaryOk gct s)
-    (hw : CallResultWitness gct argTy s (some R)) :
-    SourceCallableTy gct R ∧ WellFormedGTy gct R := by
-  cases hw with
-  | tainted =>
-      exact ⟨.any, .any⟩
-  | leaf_hit happ =>
-      rename_i f
-      have hfacet : CallableFacetOk gct f := callableSummaryOk_leaf_inv hsum
-      rcases hfacet with ⟨_, _, hret, hwfRet⟩
-      exact ⟨hret, hwfRet⟩
-  | union_some hleft hright =>
-      have hchildren := callableSummaryOk_union_inv hsum
-      rcases callResultWitness_callable_and_wf hchildren.1 hleft with ⟨hsrcLeft, hwfLeft⟩
-      rcases callResultWitness_callable_and_wf hchildren.2 hright with ⟨hsrcRight, hwfRight⟩
-      exact ⟨.union hsrcLeft hsrcRight, .union hwfLeft hwfRight⟩
-  | inter_left hleft _ =>
-      have hchildren := callableSummaryOk_intersection_inv hsum
-      exact callResultWitness_callable_and_wf hchildren.1 hleft
-  | inter_right _ hright =>
-      have hchildren := callableSummaryOk_intersection_inv hsum
-      exact callResultWitness_callable_and_wf hchildren.2 hright
-  | inter_both _ _ =>
-      exact ⟨.any, .any⟩
+/-- One call requirement and the static bounds used to select its applicable results. -/
+private structure CallRequirementBounds (gct : GClassTable) where
+  /-- The original source input and result annotations of the requirement. -/
+  requirement : CallableFacet gct
+  /-- A simplified static type equivalent to the requirement's parameter lower bound. -/
+  parameterLowerBound : WellFormedType ((eraseClassTable gct).map ClassDecl.name)
+  /-- The static argument type considered for this requirement's case.
+  It is equivalent to `upperBound argTy & upperBound requirement.paramTy`. -/
+  caseInput : WellFormedType ((eraseClassTable gct).map ClassDecl.name)
 
-theorem callSourceTy?_callable_and_wf
+/-- Compute a call result from the function requirements in the callee summary.
+Each occurrence of `any` in an annotation can be filled with a static type.
+The selected result follows the call rule for that filling, not every result type
+that static expression typing could assign to the call.
+
+For each listed `P -> R`, keep the case if `lowerBound argTy <: upperBound P`.
+Form `T = upperBound argTy & upperBound P`.
+Filter the full candidate list to keep the selected requirement and those whose
+input lower bounds include T. Keep each exactly equal result once, in its first
+position. Fold these results in the original list order.
+Equal filtered lists therefore give exactly equal results.
+Remove duplicate pairs and results. Combine the distinct case results in one approximation.
+The bounds used by these comparisons approximate the materializations. -/
+private def callResult? (gct : GClassTable) (s : CallableSummary gct) (argTy : GTy)
     (hwfct : WellFormedGClassTableCore gct)
-    (hsum : CallableSummaryOk gct s)
-    (hwfArg : WellFormedGTy gct argTy)
-    (hcall : callSourceTy? (gct := gct) (s := s) (argTy := argTy) hwfct hsum hwfArg = some R) :
-    SourceCallableTy gct R ∧ WellFormedGTy gct R := by
-  exact callResultWitness_callable_and_wf hsum (callSourceTy?_witness_of hcall)
+    (argumentValid : WellFormedGTy gct argTy) : Option (WellFormedGradualType gct) :=
+  let argumentLowerBound := lowerBoundType hwfct.toWellFormedClassHierarchy argumentValid
+  let requirements := callFacetCandidates hwfct (upperBoundType hwfct.toWellFormedClassHierarchy argumentValid) s
+  let rows := requirements.map withInputBounds
+  let parameterLowerBounds := (rows.map (·.parameterLowerBound)).eraseDups
+  let caseInputs := (rows.map (·.caseInput)).eraseDups
+  -- Each case input shares the list of parameter lower bounds that include it.
+  let caseInputChecks := caseInputs.map fun caseInput =>
+    (caseInput, parameterLowerBounds.filter fun parameterLowerBound =>
+      haveI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy caseInput parameterLowerBound
+      decide (IsSubtype hwfct.toWellFormedClassHierarchy caseInput.raw parameterLowerBound.raw))
+  combineCallResults hwfct (rows.filterMap fun row =>
+    let parameterUpperBound :=
+      upperBoundType hwfct.toWellFormedClassHierarchy row.requirement.paramTy.wellFormed
+    haveI := WellFormedType.subtypeDecidable
+      hwfct.toWellFormedClassHierarchy argumentLowerBound parameterUpperBound
+    if IsSubtype hwfct.toWellFormedClassHierarchy argumentLowerBound.raw parameterUpperBound.raw then
+      -- Every case input occurs in caseInputChecks, so lookup supplies its cached tests.
+      some (resultForInput row.requirement rows ((caseInputChecks.lookup row.caseInput).getD []))
+    else none)
+where
+  /-- Compute the requirement's parameter lower bound and case input.
+  Equivalent reductions let cases with equal static bounds share subtype tests. -/
+  withInputBounds (requirement : CallableFacet gct) :
+      CallRequirementBounds gct :=
+    { requirement := requirement
+      parameterLowerBound :=
+        (simplifySubtypeOperand hwfct.toWellFormedClassHierarchy
+          (lowerBoundType hwfct.toWellFormedClassHierarchy requirement.paramTy.wellFormed)).val
+      caseInput := (simplifySubtypeOperand hwfct.toWellFormedClassHierarchy
+        (.intersection (upperBoundType hwfct.toWellFormedClassHierarchy argumentValid)
+          (upperBoundType hwfct.toWellFormedClassHierarchy requirement.paramTy.wellFormed))).val }
 
-theorem callSourceTy?_sourceCallable
-    (hwfct : WellFormedGClassTableCore gct)
-    (hsum : CallableSummaryOk gct s)
-    (hwfArg : WellFormedGTy gct argTy)
-    (hcall : callSourceTy? (gct := gct) (s := s) (argTy := argTy) hwfct hsum hwfArg = some R) :
-    SourceCallableTy gct R :=
-  (callSourceTy?_callable_and_wf hwfct hsum hwfArg hcall).1
+  /-- Select the requirements for one argument materialization in the full list's order.
+  The caller supplies a selected requirement from this list and the parameter
+  lower bounds that include its case input. Exact equality always keeps the
+  selected requirement, even if its parameter lower bound does not include that input.
+  Equal returned requirements impose the same constraint, so retain each once. -/
+  resultForInput (requirement : CallableFacet gct) (rows : List (CallRequirementBounds gct))
+      (includedParameterLowerBounds : List (WellFormedType ((eraseClassTable gct).map ClassDecl.name))) :
+      WellFormedGradualType gct :=
+    let applicable := rows.filter fun row =>
+      row.requirement == requirement || row.parameterLowerBound ∈ includedParameterLowerBounds
+    -- The selected requirement is in applicable, so this nonempty fold cannot use the fallback.
+    (foldCallResults (mergeCallResults hwfct)
+      (applicable.map (·.requirement.returnTy)).eraseDups).getD requirement.returnTy
 
+/-- Decide call acceptance with `lowerBound calleeTy <: (lowerBound argTy -> Object)`.
+The bounds approximate filling each `any` with a static type. Object leaves the
+result unrestricted during acceptance, while checking the full callee accounts
+for class types and exclusions even when no function requirement is explicitly declared.
+This comparison also validates both annotations' names, so later checks can
+reuse the resulting packages.
+
+After acceptance, `callResult?` selects a result for later source checks. A
+single `P -> R` keeps R, including its declared unknown parts; an empty callee
+gives bottom because no value can reach the call. If selection finds no result,
+the fallback is bottom for an empty argument upper bound and any otherwise.
+The selected package proves result validity, and runtime checks test the actual
+function, argument, and result. -/
+def callSourceTy? (gct : GClassTable) (calleeTy argTy : GTy)
+    (hwfct : WellFormedGClassTableCore gct) : Option GTy :=
+  haveI := hwfct.subtypeDecidable (lowerBound calleeTy) (.callable (lowerBound argTy) staticTop)
+  if accepted : IsSubtype hwfct.toWellFormedClassHierarchy (lowerBound calleeTy)
+      (.callable (lowerBound argTy) staticTop) then
+    let calleeValid := (wellFormedGTy_of_boundsNamesKnown hwfct.raw calleeTy).1 accepted.sourceWellFormed
+    let argumentValid := (wellFormedGTy_of_boundsNamesKnown hwfct.raw argTy).1 accepted.targetWellFormed.callable_param
+    haveI : Decidable (IsSubtype hwfct.toWellFormedClassHierarchy (upperBound argTy) .bottom) :=
+      WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy
+        (upperBoundType hwfct.toWellFormedClassHierarchy argumentValid) .bottom
+    some ((callResult? gct (calleeSummarySrc gct hwfct calleeTy calleeValid) argTy hwfct argumentValid).getD
+      (if IsSubtype hwfct.toWellFormedClassHierarchy (upperBound argTy) .bottom then .bottom else .any)).raw
+  else none
+
+/-- An accepted call returns a type whose classes and MROs are valid. -/
 theorem callSourceTy?_wellFormed
     (hwfct : WellFormedGClassTableCore gct)
-    (hsum : CallableSummaryOk gct s)
-    (hwfArg : WellFormedGTy gct argTy)
-    (hcall : callSourceTy? (gct := gct) (s := s) (argTy := argTy) hwfct hsum hwfArg = some R) :
-    WellFormedGTy gct R :=
-  (callSourceTy?_callable_and_wf hwfct hsum hwfArg hcall).2
+    (hcall : callSourceTy? gct calleeTy argTy hwfct = some R) :
+    WellFormedGTy gct R := by
+  unfold callSourceTy? at hcall
+  split at hcall
+  · exact (Option.some.inj hcall) ▸ WellFormedGradualType.wellFormed _
+  · contradiction
 
-theorem callSourceTy?_transport
-    (hct : ClassTableAnnotationPrecision gct₁ gct₂)
-    (hwfct₁ : WellFormedGClassTableCore gct₁)
-    (hwfct₂ : WellFormedGClassTableCore gct₂)
-    (hsum₁ : CallableSummaryOk gct₁ s)
-    (hsum₂ : CallableSummaryOk gct₂ s)
-    (hwfArg₁ : WellFormedGTy gct₁ argTy)
-    (hwfArg₂ : WellFormedGTy gct₂ argTy) :
-    callSourceTy? (gct := gct₁) (s := s) (argTy := argTy) hwfct₁ hsum₁ hwfArg₁ =
-      callSourceTy? (gct := gct₂) (s := s) (argTy := argTy) hwfct₂ hsum₂ hwfArg₂ := by
-  let result :=
-    callSourceTy? (gct := gct₁) (s := s) (argTy := argTy) hwfct₁ hsum₁ hwfArg₁
-  have hw₁ : CallResultWitness gct₁ argTy s result := by
-    exact callSourceTy?_witness_of (result := result) rfl
-  have hw₂ : CallResultWitness gct₂ argTy s result :=
-    callResultWitness_transport hct hw₁
-  have h₂ :
-      callSourceTy? (gct := gct₂) (s := s) (argTy := argTy) hwfct₂ hsum₂ hwfArg₂ = result :=
-    callSourceTy?_of_witness (hwfct := hwfct₂) (hsum := hsum₂) (hwfArg := hwfArg₂) hw₂
-  exact h₂.symm
+/-- A call is accepted exactly when the callee lower bound accepts the argument lower bound.
+This statement uses a fixed class table with valid class structure. -/
+theorem callSourceTy?_accepts_iff
+    (hwfct : WellFormedGClassTableCore gct) :
+    (∃ R, callSourceTy? gct calleeTy argTy hwfct = some R) ↔
+      IsSubtype hwfct.toWellFormedClassHierarchy (lowerBound calleeTy)
+        (.callable (lowerBound argTy) staticTop) := by
+  unfold callSourceTy?
+  split
+  · rename_i accepted
+    constructor
+    · exact fun _ => accepted
+    · exact fun _ => ⟨_, rfl⟩
+  · rename_i rejected
+    exact ⟨fun ⟨_, impossible⟩ => False.elim (by contradiction),
+      fun accepted => False.elim (rejected accepted)⟩
+
+/-- Acceptance supplies valid class names for the argument annotation. -/
+theorem callSourceTy?_argumentWellFormed (hwfct : WellFormedGClassTableCore gct)
+    (accepted : callSourceTy? gct calleeTy argTy hwfct = some R) :
+    WellFormedGTy gct argTy :=
+  (wellFormedGTy_of_boundsNamesKnown hwfct.raw argTy).1
+    ((callSourceTy?_accepts_iff hwfct).mp ⟨R, accepted⟩).targetWellFormed.callable_param
+
+/-- Enlarging either annotation's bounds interval preserves call acceptance.
+`MoreStatic` compares these intervals. It does not compare individual fillings
+of unknown function inputs or the result types selected for later calls.
+The theorem uses the same valid class table for both calls. -/
+theorem callSourceTy?_moreStatic
+    (hwfct : WellFormedGClassTableCore gct)
+    (calleePrecision : MoreStatic gct hwfct.toWellFormedClassHierarchy calleeTy₁ calleeTy₂)
+    (argumentPrecision : MoreStatic gct hwfct.toWellFormedClassHierarchy argTy₁ argTy₂)
+    (accepted : callSourceTy? gct calleeTy₁ argTy₁ hwfct = some R₁) :
+    ∃ R₂, callSourceTy? gct calleeTy₂ argTy₂ hwfct = some R₂ := by
+  apply (callSourceTy?_accepts_iff hwfct).mpr
+  exact .trans calleePrecision.1
+    (.trans ((callSourceTy?_accepts_iff hwfct).mp ⟨R₁, accepted⟩)
+      (.callable argumentPrecision.1 (.refl (WellFormedTy.object hwfct.toWellFormedClassHierarchy))))

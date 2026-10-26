@@ -1,3 +1,4 @@
+import FwPython.Static.MRO.Structure
 import FwPython.Static.TypeSystem.Typing
 import FwPython.Static.TypeSystem.Value.Typing
 
@@ -5,51 +6,48 @@ import FwPython.Static.TypeSystem.Value.Typing
 
 /-- The heap is consistent with the class table. -/
 structure HeapWellFormed (ct : ClassTable) (h : Heap) : Prop where
+  /-- Every allocated object identifier is below the heap allocation frontier. -/
   idsBounded : h.IdsBounded
+  /-- Every stored object's class name has a declaration with a successful MRO. -/
   classesExist : ∀ oid obj, h.lookup oid = some obj →
     ∃ c mro, findClass ct obj.className = some c ∧ ComputeMro ct c mro
+  /-- The distinguished None identifier contains the ordinary None singleton. -/
   initialNone : h.lookup noneOid = some ⟨noneClass, .ordinary⟩
+  /-- The distinguished true identifier contains an ordinary Boolean. -/
   initialTrue : h.lookup trueOid = some ⟨boolClass, .ordinary⟩
+  /-- The distinguished false identifier contains an ordinary Boolean. -/
   initialFalse : h.lookup falseOid = some ⟨boolClass, .ordinary⟩
+  /-- Every Boolean object is one of the two distinguished Boolean singletons. -/
   boolExhaustive : ∀ oid obj, h.lookup oid = some obj → obj.className = boolClass →
     oid = trueOid ∨ oid = falseOid
-  /-- Bound-method payload only appears on BoundMethod-class objects. -/
-  payloadBoundMethod : ∀ oid cname recvOid m,
-    h.lookup oid = some ⟨cname, .boundMethod recvOid m⟩ →
-    cname = boundMethodClass
+  /-- BoundMethod membership identifies exactly the objects with an invokable method payload. -/
+  boundMethodShape : ∀ oid obj, h.lookup oid = some obj →
+    (obj.className = boundMethodClass ↔
+      ∃ receiver method, obj.payload = .boundMethod receiver method)
   /-- Bound-method receivers exist in the heap with valid method provenance. -/
   payloadReceiverValid : ∀ oid cname recvOid m,
     h.lookup oid = some ⟨cname, .boundMethod recvOid m⟩ →
     ∃ recvObj, h.lookup recvOid = some recvObj ∧
       MethodInReceiverMro ct recvObj.className m
 
-/-! ## Well-formed class table -/
+/-! ## Well-typed class hierarchy -/
 
-/-- Constructive lookup witness for a class name together with its MRO. -/
-abbrev ClassLookupWitness (ct : ClassTable) (cname : Identifier) :=
-  ClassLookupWitnessOf findClass ComputeMro ct cname
-
-/-- Constructive MRO witness for an already chosen class. -/
-abbrev ClassMroWitness (ct : ClassTable) (cls : Class) :=
-  ClassMroWitnessOf ComputeMro ct cls
-
-/-- Constructive witness that `Object` exists and has no explicit bases. -/
-abbrev ObjectExistsWitness (ct : ClassTable) :=
-  ObjectExistsWitnessOf findClass ClassDecl.baseClasses objectClass ct
-
-/-- Every method body typechecks under its declared signature. -/
-def AllMethodsWellTyped (ct : ClassTable) : Prop :=
+/-- Every own method body in the first declaration found for each class name
+typechecks under its declared signature. -/
+def AllMethodsWellTyped {ct : ClassTable} (structural : WellFormedClassHierarchy ct) : Prop :=
   ∀ cname c m,
     findClass ct cname = some c →
     m ∈ c.methods →
-    HasType ct
+    HasType structural
       [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
       m.body
       m.returnTy
 
-/-- Method overrides satisfy the Liskov substitution principle:
-    contravariant parameters, covariant returns. -/
-def LiskovCondition (ct : ClassTable) : Prop :=
+/-- Compare the method selected through a class's MRO with the same named method
+selected through each ancestor's own MRO. The class's selected method must accept
+the ancestor's inputs and have a result type below the ancestor's result type,
+whether inherited or declared directly. -/
+def LiskovCondition {ct : ClassTable} (structural : WellFormedClassHierarchy ct) : Prop :=
   ∀ cname aname c_cls a_cls mro_c mro_a methodName m_c m_a,
     findClass ct cname = some c_cls →
     ComputeMro ct c_cls mro_c →
@@ -58,79 +56,39 @@ def LiskovCondition (ct : ClassTable) : Prop :=
     ComputeMro ct a_cls mro_a →
     findMethodInMro ct mro_c methodName = some m_c →
     findMethodInMro ct mro_a methodName = some m_a →
-    IsSubtype ct m_a.paramTy m_c.paramTy ∧
-      IsSubtype ct m_c.returnTy m_a.returnTy
+    IsSubtype structural m_a.paramTy m_c.paramTy ∧
+      IsSubtype structural m_c.returnTy m_a.returnTy
 
-/-- A well-formed class table has well-typed methods, Liskov-compatible overrides,
-    and properly configured built-in classes. -/
-structure WellFormedClassTable (ct : ClassTable) where
-  allMethodsWellTyped : AllMethodsWellTyped ct
-  liskovCondition : LiskovCondition ct
-  /-- Bool and NoneType exist in the class table with valid MROs. -/
-  boolExists : ClassLookupWitness ct boolClass
-  noneExists : ClassLookupWitness ct noneClass
-  /-- BoundMethod exists in the class table with a valid MRO. -/
-  boundMethodExists : ClassLookupWitness ct boundMethodClass
-  /-- No class extends Bool or NoneType — they are leaf classes. -/
-  builtinsLeaf : ∀ cname c mro, findClass ct cname = some c →
-    ComputeMro ct c mro → boolClass ∈ mro → cname = boolClass
-  noneLeaf : ∀ cname c mro, findClass ct cname = some c →
-    ComputeMro ct c mro → noneClass ∈ mro → cname = noneClass
-  /-- BoundMethod is a leaf class. -/
-  boundMethodLeaf : ∀ cname c mro, findClass ct cname = some c →
-    ComputeMro ct c mro → boundMethodClass ∈ mro → cname = boundMethodClass
-  /-- Every class in the table has a valid MRO (no cycles). -/
-  allMrosExist : ∀ cname c, findClass ct cname = some c → ClassMroWitness ct c
-  /-- Method names are unique within each class. -/
+/-- The hierarchy of `ct` together with typed method bodies, compatible MRO-selected
+methods, and declaration consistency. The inherited `WellFormedClassHierarchy`
+supplies the facts for subtyping; subtyping supports the method typing and
+override checks in this record. -/
+structure WellTypedClassHierarchy (ct : ClassTable) extends WellFormedClassHierarchy ct where
+  /-- In the first declaration found for each class name, every own method body
+  has its declared result type when the argument has its declared parameter type
+  and the receiver has that declaration's class type. -/
+  allMethodsWellTyped : AllMethodsWellTyped toWellFormedClassHierarchy
+  /-- The method selected through a class's MRO accepts the input type of the
+  method selected through each ancestor's MRO and has a result type below that
+  method's result type. -/
+  liskovCondition : LiskovCondition toWellFormedClassHierarchy
+  /-- In the first declaration found for each class name, method names are distinct.
+  This is a source language rule. -/
   allMethodNamesDistinct : ∀ cname c, findClass ct cname = some c →
     List.Nodup (c.methods.map MethodDecl.name)
-  /-- Every method signature uses well-formed types. -/
+  /-- In the first declaration found for each class name, every own method
+  signature mentions only class names with declarations. -/
   allMethodSignaturesWellFormed : ∀ cname c m, findClass ct cname = some c →
     m ∈ c.methods → WellFormedTy ct m.paramTy ∧ WellFormedTy ct m.returnTy
-  /-- Class names in the class table are unique. -/
+  /-- Declarations sharing a name agree in their entire class and method data. -/
   classNamesUnique : ∀ c₁ c₂, c₁ ∈ ct → c₂ ∈ ct → c₁.name = c₂.name → c₁ = c₂
-  /-- Direct parent lists are duplicate-free. -/
+  /-- The first declaration found for each class name lists each explicit direct parent at most once. -/
   baseClassesDistinct : ∀ cname c, findClass ct cname = some c → c.baseClasses.Nodup
-  /-- Object exists in the class table and has no explicit base class. -/
-  objectExists : ObjectExistsWitness ct
 
-/-- `class_ objectClass` is well-formed under any well-formed class table. -/
-theorem wellFormed_object_type (hwf : WellFormedClassTable ct) :
-    WellFormedTy ct (.class_ objectClass) := by
-  obtain ⟨c, hfind, _⟩ := hwf.objectExists
-  exact .class_ hfind (hwf.allMrosExist _ _ hfind).hmro
-
-/-- `class_ boolClass` is well-formed under any well-formed class table. -/
-theorem wellFormed_bool_type (hwf : WellFormedClassTable ct) :
-    WellFormedTy ct (.class_ boolClass) :=
-  .class_ hwf.boolExists.hfind hwf.boolExists.hmro
-
-/-- `class_ noneClass` is well-formed under any well-formed class table. -/
-theorem wellFormed_none_type (hwf : WellFormedClassTable ct) :
-    WellFormedTy ct (.class_ noneClass) :=
-  .class_ hwf.noneExists.hfind hwf.noneExists.hmro
-
-/-! ## Leaf built-in derivations -/
-
-/-- `Bool` is a leaf built-in under any well-formed class table. -/
-theorem leafBuiltin_bool (hwf : WellFormedClassTable ct) :
-    LeafBuiltin ct boolClass :=
-  .bool hwf.builtinsLeaf
-
-/-- `NoneType` is a leaf built-in under any well-formed class table. -/
-theorem leafBuiltin_none (hwf : WellFormedClassTable ct) :
-    LeafBuiltin ct noneClass :=
-  .none hwf.noneLeaf
-
-/-- `BoundMethod` is a leaf built-in under any well-formed class table. -/
-theorem leafBuiltin_boundMethod (hwf : WellFormedClassTable ct) :
-    LeafBuiltin ct boundMethodClass :=
-  .boundMethod hwf.boundMethodLeaf
-
-theorem WellFormedClassTable.allMrosExist_exists (hwf : WellFormedClassTable ct) :
-    ∀ cname c, findClass ct cname = some c → ∃ mro, ComputeMro ct c mro :=
-  fun _ _ hfind => (hwf.allMrosExist _ _ hfind).exists
-
-theorem WellFormedClassTable.boundMethodExists_find (hwf : WellFormedClassTable ct) :
-    ∃ c, findClass ct boundMethodClass = some c :=
-  hwf.boundMethodExists.exists_find
+/-- A method selected from the receiver's MRO has a valid function annotation. -/
+theorem methodInReceiverMro_wellFormed (hwf : WellTypedClassHierarchy ct)
+    (selected : MethodInReceiverMro ct receiverClass method) :
+    WellFormedTy ct (.callable method.paramTy method.returnTy) := by
+  obtain ⟨_, _, _, _, methodLookup⟩ := selected
+  obtain ⟨owner, declaration, _, classLookup, member⟩ := findMethodInMro_provenance methodLookup
+  exact (hwf.allMethodSignaturesWellFormed owner declaration method classLookup member).elim .callable

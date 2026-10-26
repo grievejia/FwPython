@@ -9,70 +9,31 @@ namespace Checked
 inductive Control : Type where
   | expr : CheckedExpr → Control
   | val : CheckedValue → Control
-  | blame : Label → Control
+  /-- Checked-machine blame payload preserved while continuation frames unwind. -/
+  | blame : BlameInfo → Control
   | runtimeError : String → Control
   deriving DecidableEq, Repr
 
 /-- A continuation frame records one pending evaluation context element. -/
 inductive Frame : Type where
   | attrAccess : Identifier → Frame
+  /-- Call-callee evaluation context storing the call expression's parameter
+      target, call-site return target, and call-site return obligation. -/
   | callCallee : CheckedExpr → (paramTy : CheckedTarget) → (returnTy : CheckedTarget) →
-      BoundaryLabels (compileBoundaryTarget returnTy) → Frame
-  | callValue : CheckedValue → (paramTy : CheckedTarget) → (returnTy : CheckedTarget) →
-      BoundaryLabels (compileBoundaryTarget returnTy) → Frame
+      SourceObligation → Frame
+  /-- Method-entry context storing the receiver object id, resolved checked
+      method, call-site return target, and call-site return obligation. -/
   | awaitArgument : Nat → CheckedMethod → (returnTy : CheckedTarget) →
-      BoundaryLabels (compileBoundaryTarget returnTy) → Frame
+      SourceObligation → Frame
   | cond : CheckedExpr → CheckedExpr → Frame
   | returnTo : CheckedEnv → Frame
-  | enforce : (target : CheckedTarget) → BoundaryLabels (compileBoundaryTarget target) → Frame
-  | dynAttrAccess : Identifier → Label → Frame
+  /-- Boundary-enforcement context storing the checked target being enforced and
+      the source obligation to report if that boundary rejects the value. -/
+  | enforce : (target : CheckedTarget) → SourceObligation → Frame
+  /-- Dynamic-attribute context storing the requested attribute and the source
+      obligation to report if dynamic lookup fails. -/
+  | dynAttrAccess : Identifier → SourceObligation → Frame
   deriving DecidableEq, Repr
-
-theorem _root_.frame_callCallee_inversion
-    {arg₁ arg₂ : CheckedExpr}
-    {paramTy₁ paramTy₂ returnTy₁ returnTy₂ : CheckedTarget}
-    {returnLabels₁ : BoundaryLabels (compileBoundaryTarget returnTy₁)}
-    {returnLabels₂ : BoundaryLabels (compileBoundaryTarget returnTy₂)}
-    (h :
-      Checked.Frame.callCallee arg₁ paramTy₁ returnTy₁ returnLabels₁ =
-        Checked.Frame.callCallee arg₂ paramTy₂ returnTy₂ returnLabels₂) :
-    ∃ hret : returnTy₁ = returnTy₂,
-      arg₁ = arg₂ ∧
-      paramTy₁ = paramTy₂ ∧
-      hret ▸ returnLabels₁ = returnLabels₂ := by
-  cases h
-  exact ⟨rfl, rfl, rfl, rfl⟩
-
-theorem _root_.frame_callValue_inversion
-    {arg₁ arg₂ : CheckedValue}
-    {paramTy₁ paramTy₂ returnTy₁ returnTy₂ : CheckedTarget}
-    {returnLabels₁ : BoundaryLabels (compileBoundaryTarget returnTy₁)}
-    {returnLabels₂ : BoundaryLabels (compileBoundaryTarget returnTy₂)}
-    (h :
-      Checked.Frame.callValue arg₁ paramTy₁ returnTy₁ returnLabels₁ =
-        Checked.Frame.callValue arg₂ paramTy₂ returnTy₂ returnLabels₂) :
-    ∃ hret : returnTy₁ = returnTy₂,
-      arg₁ = arg₂ ∧
-      paramTy₁ = paramTy₂ ∧
-      hret ▸ returnLabels₁ = returnLabels₂ := by
-  cases h
-  exact ⟨rfl, rfl, rfl, rfl⟩
-
-theorem _root_.frame_awaitArgument_inversion
-    {recvOid₁ recvOid₂ : Nat}
-    {m₁ m₂ : CheckedMethod}
-    {returnTy₁ returnTy₂ : CheckedTarget}
-    {returnLabels₁ : BoundaryLabels (compileBoundaryTarget returnTy₁)}
-    {returnLabels₂ : BoundaryLabels (compileBoundaryTarget returnTy₂)}
-    (h :
-      Checked.Frame.awaitArgument recvOid₁ m₁ returnTy₁ returnLabels₁ =
-        Checked.Frame.awaitArgument recvOid₂ m₂ returnTy₂ returnLabels₂) :
-    ∃ hret : returnTy₁ = returnTy₂,
-      recvOid₁ = recvOid₂ ∧
-      m₁ = m₂ ∧
-      hret ▸ returnLabels₁ = returnLabels₂ := by
-  cases h
-  exact ⟨rfl, rfl, rfl, rfl⟩
 
 /-- A continuation is a stack of frames. -/
 abbrev Continuation := List Frame
@@ -96,10 +57,21 @@ def initialState (program : CheckedProgram) : State :=
 /-- Extract the final result from a terminal state. -/
 def finalResult? : State → Option (CheckedHeap × CheckedResult)
   | { heap, control := .val v, continuation := [], .. } => some (heap, .success v)
-  | { heap, control := .blame ℓ, continuation := [], .. } => some (heap, .blame ℓ)
+  | { heap, control := .blame info, continuation := [], .. } => some (heap, .blame info)
   | { heap, control := .runtimeError err, continuation := [], .. } =>
     some (heap, .runtimeError err)
   | _ => none
+
+/-- If a state extracts a final blame result, the state control is that blame
+payload, the continuation is empty, and the extracted heap is the state heap. -/
+theorem finalResult_blame_control
+    (hfinal :
+      finalResult? state =
+        some (heap', CheckedResult.blame info)) :
+    state.heap = heap' ∧
+    state.control = .blame info ∧
+    state.continuation = [] := by
+  rcases state with ⟨_, _, _ | _ | _ | _, _ | _⟩ <;> simp_all [finalResult?]
 
 /-! ## One-Step Reduction -/
 
@@ -119,10 +91,10 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
   | focusCall :
       Step ct cct
         { heap, env,
-          control := .expr (.call callee arg paramTy returnTy returnLabels),
+          control := .expr (.call callee arg paramTy returnTy returnObligation),
           continuation := k }
         { heap, env, control := .expr callee,
-          continuation := .callCallee arg paramTy returnTy returnLabels :: k }
+          continuation := .callCallee arg paramTy returnTy returnObligation :: k }
 
   | focusCond :
       (∀ x C, condExpr ≠ .isInstance x C) →
@@ -158,13 +130,14 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
 
   | focusEnforce :
       Step ct cct
-        { heap, env, control := .expr (.enforce e c labels), continuation := k }
-        { heap, env, control := .expr e, continuation := .enforce c labels :: k }
+        { heap, env, control := .expr (.enforce e c obligation), continuation := k }
+        { heap, env, control := .expr e, continuation := .enforce c obligation :: k }
 
   | focusDynAttrAccess :
       Step ct cct
-        { heap, env, control := .expr (.dynAttrAccess base attrName ℓ), continuation := k }
-        { heap, env, control := .expr base, continuation := .dynAttrAccess attrName ℓ :: k }
+        { heap, env, control := .expr (.dynAttrAccess base attrName obligation), continuation := k }
+        { heap, env, control := .expr base,
+          continuation := .dynAttrAccess attrName obligation :: k }
 
   -- Atomic evaluation
 
@@ -281,7 +254,7 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
       heap.alloc ⟨boundMethodClass, .boundMethod objOid cm⟩ = (bmOid, heap') →
       Step ct cct
         { heap, env, control := .val (.objRef objOid),
-          continuation := .dynAttrAccess attrName ℓ :: k }
+          continuation := .dynAttrAccess attrName obligation :: k }
         { heap := heap', env, control := .val (.objRef bmOid), continuation := k }
 
   | returnDynAttrAccessNotFound :
@@ -291,8 +264,12 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
       findCheckedMethodInMro cct mro attrName = none →
       Step ct cct
         { heap, env, control := .val (.objRef objOid),
-          continuation := .dynAttrAccess attrName ℓ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+          continuation := .dynAttrAccess attrName obligation :: k }
+        { heap, env,
+          control := .blame
+            { obligation := obligation,
+              cause := .missingAttribute (.objRef objOid) attrName },
+          continuation := k }
 
   -- Return rules: call callee evaluation
 
@@ -300,61 +277,44 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
       heap.lookup calleeOid = some ⟨boundMethodClass, .boundMethod recvOid m⟩ →
       Step ct cct
         { heap, env, control := .val (.objRef calleeOid),
-          continuation := .callCallee arg paramTy returnTy returnLabels :: k }
+          continuation := .callCallee arg paramTy returnTy returnObligation :: k }
         { heap, env, control := .expr arg,
-          continuation := .awaitArgument recvOid m returnTy returnLabels :: k }
+          continuation := .awaitArgument recvOid m returnTy returnObligation :: k }
 
   | returnCallCalleeNotCallable :
       heap.lookup calleeOid = some ⟨_, .ordinary⟩ →
       Step ct cct
         { heap, env, control := .val (.objRef calleeOid),
-          continuation := .callCallee arg paramTy returnTy returnLabels :: k }
+          continuation := .callCallee arg paramTy returnTy returnObligation :: k }
         { heap, env, control := .runtimeError "Cannot call non-invokable value",
           continuation := k }
 
   -- Return rules: argument evaluation (bare bound method)
-  -- Execution order: (1) enforce arg against m.parameterContract,
-  -- (2) execute body, (3) enforce result against m.returnContract.
+  -- Execution order: (1) enforce arg against m.paramTy,
+  -- (2) execute body, (3) enforce result against m.returnTy and the call-site return target.
 
   | returnAwaitArgumentOk :
-      EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) m.parameterLabels (.ok argVal') →
+      EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) .ok →
       Step ct cct
         { heap, env, control := .val argVal,
-          continuation := .awaitArgument recvOid m returnTy returnLabels :: k }
+          continuation := .awaitArgument recvOid m returnTy returnObligation :: k }
         { heap,
-          env := [(m.param, argVal'), (m.receiverParam, .objRef recvOid)],
+          env := [(m.param, argVal), (m.receiverParam, .objRef recvOid)],
           control := .expr m.body,
           continuation :=
-            .enforce m.returnTy m.returnLabels ::
-              .enforce returnTy returnLabels ::
+            .enforce m.returnTy m.returnObligation ::
+              .enforce returnTy returnObligation ::
               .returnTo env :: k }
 
   | returnAwaitArgumentBlame :
-      EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) m.parameterLabels
-        (.blame m.parameterLabels.direct) →
+      EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) .blame →
       Step ct cct
         { heap, env, control := .val argVal,
-          continuation := .awaitArgument recvOid m returnTy returnLabels :: k }
-        { heap, env, control := .blame m.parameterLabels.direct, continuation := k }
-
-  -- Return rules: call with pre-evaluated argument
-  -- Dispatches based on the callee value: bound method enters the bare-method
-  -- path and ordinary object is an error.
-
-  | returnCallValueBound :
-      heap.lookup calleeOid = some ⟨boundMethodClass, .boundMethod recvOid m⟩ →
-      Step ct cct
-        { heap, env, control := .val (.objRef calleeOid),
-          continuation := .callValue argVal paramTy returnTy returnLabels :: k }
-        { heap, env, control := .val argVal,
-          continuation := .awaitArgument recvOid m returnTy returnLabels :: k }
-
-  | returnCallValueNotCallable :
-      heap.lookup calleeOid = some ⟨_, .ordinary⟩ →
-      Step ct cct
-        { heap, env, control := .val (.objRef calleeOid),
-          continuation := .callValue argVal paramTy returnTy returnLabels :: k }
-        { heap, env, control := .runtimeError "Cannot call non-invokable value",
+          continuation := .awaitArgument recvOid m returnTy returnObligation :: k }
+        { heap, env,
+          control := .blame
+            { obligation := m.parameterObligation,
+              cause := .methodParameter argVal m },
           continuation := k }
 
   -- Return rules: conditionals
@@ -388,58 +348,57 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
         { heap, env := callerEnv, control := .val v, continuation := k }
 
   | returnEnforceOk :
-      EnforceValue ct heap v (compileBoundaryTarget c) labels (.ok v') →
+      EnforceValue ct heap v (compileBoundaryTarget c) .ok →
       Step ct cct
-        { heap, env, control := .val v, continuation := .enforce c labels :: k }
-        { heap, env, control := .val v', continuation := k }
+        { heap, env, control := .val v, continuation := .enforce c obligation :: k }
+        { heap, env, control := .val v, continuation := k }
 
   | returnEnforceBlame :
-      EnforceValue ct heap v (compileBoundaryTarget c) labels (.blame labels.direct) →
+      EnforceValue ct heap v (compileBoundaryTarget c) .blame →
       Step ct cct
-        { heap, env, control := .val v, continuation := .enforce c labels :: k }
-        { heap, env, control := .blame labels.direct, continuation := k }
+        { heap, env, control := .val v, continuation := .enforce c obligation :: k }
+        { heap, env,
+          control := .blame
+            { obligation := obligation,
+              cause := .boundary v c },
+          continuation := k }
 
   -- Blame propagation (unwinding frames)
 
   | blameUnwindAttrAccess :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .attrAccess _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .attrAccess _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   | blameUnwindCallCallee :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .callCallee _ _ _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .callCallee _ _ _ _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   | blameUnwindAwaitArgument :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .awaitArgument _ _ _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
-
-  | blameUnwindCallValue :
-      Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .callValue _ _ _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .awaitArgument _ _ _ _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   | blameUnwindCond :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .cond _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .cond _ _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   | blameUnwindReturnTo :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .returnTo callerEnv :: k }
-        { heap, env := callerEnv, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .returnTo callerEnv :: k }
+        { heap, env := callerEnv, control := .blame info, continuation := k }
 
   | blameUnwindEnforce :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .enforce _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .enforce _ _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   | blameUnwindDynAttrAccess :
       Step ct cct
-        { heap, env, control := .blame ℓ, continuation := .dynAttrAccess _ _ :: k }
-        { heap, env, control := .blame ℓ, continuation := k }
+        { heap, env, control := .blame info, continuation := .dynAttrAccess _ _ :: k }
+        { heap, env, control := .blame info, continuation := k }
 
   -- Error propagation (unwinding frames)
 
@@ -456,11 +415,6 @@ inductive Step (ct : GClassTable) (cct : CheckedClassTable) : State → State �
   | errorUnwindAwaitArgument :
       Step ct cct
         { heap, env, control := .runtimeError err, continuation := .awaitArgument _ _ _ _ :: k }
-        { heap, env, control := .runtimeError err, continuation := k }
-
-  | errorUnwindCallValue :
-      Step ct cct
-        { heap, env, control := .runtimeError err, continuation := .callValue _ _ _ _ :: k }
         { heap, env, control := .runtimeError err, continuation := k }
 
   | errorUnwindCond :
@@ -489,11 +443,11 @@ theorem finalResult_none_of_nonempty_continuation
     {heap : CheckedHeap} {env : CheckedEnv} {ctrl : Control}
     {f : Frame} {k : Continuation} :
     finalResult? { heap, env, control := ctrl, continuation := f :: k } = none := by
-  cases ctrl <;> simp [finalResult?]
+  cases ctrl <;> rfl
 
 theorem final_states_do_not_step
     (hfinal : finalResult? s = some r)
     (hstep : Checked.Step ct cct s s') : False := by
-  cases hstep <;> simp [finalResult?] at hfinal
+  cases hstep <;> cases hfinal
 
 end Checked

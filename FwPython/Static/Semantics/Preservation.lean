@@ -4,64 +4,70 @@ import FwPython.Static.Semantics.HeapPreservation
 import FwPython.Static.TypeSystem.TypingLemmas
 import FwPython.Static.TypeSystem.WellFormedness
 import FwPython.Static.Semantics.Heap
+import FwPython.Static.Subtyping.Inversion
+
+open FwPython.Static.Subtyping
 
 /-! # Preservation for Safe States
 
 One-step preservation: stepping from a safe state produces a safe state. -/
 
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
+
 namespace SmallStep
 
 /-! ## Monotonicity of frame and continuation typing under heap extension -/
 
+/-- Frame typing is preserved when every object lookup in the first heap holds in the second. -/
 private def frameHasType_mono
-    (hf : FrameHasType ct h inΓ inTy outΓ outTy f)
+    (hf : FrameHasType structural h inΓ inTy outΓ outTy f)
     (hmono : ∀ {oid obj}, h.lookup oid = some obj → h'.lookup oid = some obj) :
-    FrameHasType ct h' inΓ inTy outΓ outTy f :=
+    FrameHasType structural h' inΓ inTy outΓ outTy f :=
   match hf with
-  | .attrAccess hfmt hsub hwfOut => .attrAccess hfmt hsub hwfOut
-  | .attrAccessUnion hfmt1 hfmt2 hsub hwfOut => .attrAccessUnion hfmt1 hfmt2 hsub hwfOut
-  | .callCallee harg hsub hwfOut => .callCallee harg hsub hwfOut
-  | .awaitArgument hlook hprov hsub hwfOut => .awaitArgument (hmono hlook) hprov hsub hwfOut
-  | .cond hthen helse hsub hwfOut => .cond hthen helse hsub hwfOut
+  | .attrAccess hfmt hsub => .attrAccess hfmt hsub
+  | .attrAccessUnion hfmt1 hfmt2 hsub => .attrAccessUnion hfmt1 hfmt2 hsub
+  | .callCallee harg hsub => .callCallee harg hsub
+  | .awaitArgument hlook hprov hsub => .awaitArgument (hmono hlook) hprov hsub
+  | .cond hthen helse hsub => .cond hthen helse hsub
   | .returnTo henv => .returnTo (env_has_type_mono henv hmono)
   | .interIntro hf1 hf2 hwfIn1 hwfIn2 =>
     .interIntro (frameHasType_mono hf1 hmono) (frameHasType_mono hf2 hmono) hwfIn1 hwfIn2
-  | .sub hf' hsub hwfOut => .sub (frameHasType_mono hf' hmono) hsub hwfOut
+  | .sub hf' hsub => .sub (frameHasType_mono hf' hmono) hsub
 
 private theorem continuationHasType_mono
-    (hk : ContinuationHasType ct h inΓ inTy outΓ outTy k)
+    (hk : ContinuationHasType structural h inΓ inTy outΓ outTy k)
     (hmono : ∀ {oid obj}, h.lookup oid = some obj → h'.lookup oid = some obj) :
-    ContinuationHasType ct h' inΓ inTy outΓ outTy k := by
+    ContinuationHasType structural h' inΓ inTy outΓ outTy k := by
   induction hk with
   | nil => exact .nil
   | cons hf _ ih => exact .cons (frameHasType_mono hf hmono) ih
 
 /-! ## Focus rule helpers: construct `FrameHasType` directly from typing -/
 
+/-- A typed attribute access supplies its receiver type and a frame that produces the result. -/
 private theorem attrAccess_frame_of_type
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
-    (hty : HasType ct Γ (.attrAccess base attrName) T) :
+    (hty : HasType hwf.toWellFormedClassHierarchy Γ (.attrAccess base attrName) T) :
     ∃ Tbase,
-      HasType ct Γ base Tbase ∧
-      FrameHasType ct h Γ Tbase Γ T (.attrAccess attrName) := by
+      HasType hwf.toWellFormedClassHierarchy Γ base Tbase ∧
+      FrameHasType hwf.toWellFormedClassHierarchy h Γ Tbase Γ T (.attrAccess attrName) := by
   generalize he : Expr.attrAccess base attrName = e at hty
   induction hty with
-  | sub _ hsub hwfU ih =>
-    obtain ⟨Tbase, hbase, hframe⟩ := ih hwf hΓwf he
-    exact ⟨Tbase, hbase, .sub hframe hsub hwfU⟩
+  | sub _ hsub ih =>
+    obtain ⟨Tbase, hbase, hframe⟩ := ih hΓwf he
+    exact ⟨Tbase, hbase, .sub hframe hsub⟩
   | attrAccess hbase hfmt =>
     cases he
-    exact ⟨_, hbase, .attrAccess hfmt .refl
-      ((findMethodType_wellFormed hwf hfmt).elim .callable)⟩
+    exact ⟨_, hbase, .attrAccess hfmt (.refl (findMethodType_wellFormed hwf hfmt))⟩
   | attrAccessUnion hbase hfmt1 hfmt2 =>
     cases he
-    exact ⟨_, hbase, .attrAccessUnion hfmt1 hfmt2 .refl
-      (.union ((findMethodType_wellFormed hwf hfmt1).elim .callable)
-        ((findMethodType_wellFormed hwf hfmt2).elim .callable))⟩
+    exact ⟨_, hbase, .attrAccessUnion hfmt1 hfmt2 (.refl
+      (.union (findMethodType_wellFormed hwf hfmt1)
+        (findMethodType_wellFormed hwf hfmt2)))⟩
   | interIntro _ _ ih1 ih2 =>
-    obtain ⟨Tbase₁, hbase₁, hframe₁⟩ := ih1 hwf hΓwf he
-    obtain ⟨Tbase₂, hbase₂, hframe₂⟩ := ih2 hwf hΓwf he
+    obtain ⟨Tbase₁, hbase₁, hframe₁⟩ := ih1 hΓwf he
+    obtain ⟨Tbase₂, hbase₂, hframe₂⟩ := ih2 hΓwf he
     exact ⟨.intersection Tbase₁ Tbase₂,
       .interIntro hbase₁ hbase₂,
       .interIntro hframe₁ hframe₂
@@ -69,27 +75,27 @@ private theorem attrAccess_frame_of_type
         (hasType_wellFormed hwf hΓwf hbase₂)⟩
   | _ => exact Expr.noConfusion he
 
+/-- A typed call supplies its callee type and a frame that evaluates the argument next. -/
 private theorem call_frame_of_type
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
-    (hty : HasType ct Γ (.call callee arg) T) :
+    (hty : HasType hwf.toWellFormedClassHierarchy Γ (.call callee arg) T) :
     ∃ calleeTy,
-      HasType ct Γ callee calleeTy ∧
-      FrameHasType ct h Γ calleeTy Γ T (.callCallee arg) := by
+      HasType hwf.toWellFormedClassHierarchy Γ callee calleeTy ∧
+      FrameHasType hwf.toWellFormedClassHierarchy h Γ calleeTy Γ T (.callCallee arg) := by
   generalize he : Expr.call callee arg = e at hty
   induction hty with
-  | sub _ hsub hwfU ih =>
-    obtain ⟨calleeTy, hcallee, hframe⟩ := ih hwf hΓwf he
-    exact ⟨calleeTy, hcallee, .sub hframe hsub hwfU⟩
+  | sub _ hsub ih =>
+    obtain ⟨calleeTy, hcallee, hframe⟩ := ih hΓwf he
+    exact ⟨calleeTy, hcallee, .sub hframe hsub⟩
   | call hcallee harg hsubArg =>
     cases he
-    obtain ⟨hwfParam, hwfReturn⟩ :=
-      WellFormedTy.callable_inv (hasType_wellFormed hwf hΓwf hcallee)
-    have hargParam := HasType.sub harg hsubArg hwfParam
-    exact ⟨_, hcallee, .callCallee hargParam .refl hwfReturn⟩
+    have hwfReturn := (hasType_wellFormed hwf hΓwf hcallee).callable_return
+    have hargParam := HasType.sub harg hsubArg
+    exact ⟨_, hcallee, .callCallee hargParam (.refl hwfReturn)⟩
   | interIntro _ _ ih1 ih2 =>
-    obtain ⟨calleeTy₁, hcallee₁, hframe₁⟩ := ih1 hwf hΓwf he
-    obtain ⟨calleeTy₂, hcallee₂, hframe₂⟩ := ih2 hwf hΓwf he
+    obtain ⟨calleeTy₁, hcallee₁, hframe₁⟩ := ih1 hΓwf he
+    obtain ⟨calleeTy₂, hcallee₂, hframe₂⟩ := ih2 hΓwf he
     exact ⟨.intersection calleeTy₁ calleeTy₂,
       .interIntro hcallee₁ hcallee₂,
       .interIntro hframe₁ hframe₂
@@ -97,36 +103,36 @@ private theorem call_frame_of_type
         (hasType_wellFormed hwf hΓwf hcallee₂)⟩
   | _ => exact Expr.noConfusion he
 
+/-- A typed conditional supplies its test type and a frame that selects a typed branch. -/
 private theorem cond_frame_of_type
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
-    (hty : HasType ct Γ (.cond condExpr thenBr elseBr) T)
+    (hty : HasType hwf.toWellFormedClassHierarchy Γ (.cond condExpr thenBr elseBr) T)
     (hne : ∀ x C, condExpr ≠ .isInstance x C) :
     ∃ Tcond,
-      HasType ct Γ condExpr Tcond ∧
-      FrameHasType ct h Γ Tcond Γ T (.cond thenBr elseBr) := by
+      HasType hwf.toWellFormedClassHierarchy Γ condExpr Tcond ∧
+      FrameHasType hwf.toWellFormedClassHierarchy h Γ Tcond Γ T (.cond thenBr elseBr) := by
   generalize he : Expr.cond condExpr thenBr elseBr = e at hty
   induction hty generalizing condExpr thenBr elseBr with
-  | sub _ hsub hwfU ih =>
-    obtain ⟨Tcond, hcondExpr, hframe⟩ := ih hwf hΓwf hne he
-    exact ⟨Tcond, hcondExpr, .sub hframe hsub hwfU⟩
+  | sub _ hsub ih =>
+    obtain ⟨Tcond, hcondExpr, hframe⟩ := ih hΓwf hne he
+    exact ⟨Tcond, hcondExpr, .sub hframe hsub⟩
   | cond hcond hbool hthen helse =>
     cases he
-    have hcondBool := HasType.sub hcond hbool (wellFormed_bool_type hwf)
+    have hcondBool := HasType.sub hcond hbool
     have hwfUnion : WellFormedTy _ (.union _ _) :=
       .union (hasType_wellFormed hwf hΓwf hthen) (hasType_wellFormed hwf hΓwf helse)
     exact ⟨_, hcondBool,
       .cond
-        (.sub hthen (.unionLeft .refl) hwfUnion)
-        (.sub helse (.unionRight .refl) hwfUnion)
-        .refl
-        hwfUnion⟩
+        (.sub hthen (.unionLeft (.refl hwfUnion.union_left) hwfUnion.union_right))
+        (.sub helse (.unionRight (.refl hwfUnion.union_right) hwfUnion.union_left))
+        (.refl hwfUnion)⟩
   | condIsInstance _ _ _ _ =>
     cases he
     exact (hne _ _ rfl).elim
   | interIntro _ _ ih1 ih2 =>
-    obtain ⟨Tcond₁, hcond₁, hframe₁⟩ := ih1 hwf hΓwf hne he
-    obtain ⟨Tcond₂, hcond₂, hframe₂⟩ := ih2 hwf hΓwf hne he
+    obtain ⟨Tcond₁, hcond₁, hframe₁⟩ := ih1 hΓwf hne he
+    obtain ⟨Tcond₂, hcond₂, hframe₂⟩ := ih2 hΓwf hne he
     exact ⟨.intersection Tcond₁ Tcond₂,
       .interIntro hcond₁ hcond₂,
       .interIntro hframe₁ hframe₂
@@ -139,151 +145,133 @@ private theorem cond_frame_of_type
 /-- Type the then-branch at the narrowed environment, by induction on the
     original conditional typing. -/
 private theorem condIsInstanceTrue_typing
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
-    (hty : HasType ct Γ (.cond (.isInstance x C) thenBr elseBr) T)
+    (hty : HasType hwf.toWellFormedClassHierarchy Γ (.cond (.isInstance x C) thenBr elseBr) T)
     (hlookΓ : Γ.lookup x = some S)
-    (hfindCls : findClass ct C = some cls)
-    (hwfNarrow : WellFormedTy ct (.intersection S (.class_ C))) :
-    HasType ct (Γ.update x (.intersection S (.class_ C))) thenBr T := by
+    (hfindCls : findClass ct C = some cls) :
+    HasType hwf.toWellFormedClassHierarchy (Γ.update x (.intersection S (.class_ C))) thenBr T := by
   generalize he : Expr.cond (.isInstance x C) thenBr elseBr = e at hty
   induction hty generalizing x C S cls thenBr elseBr with
   | cond _ _ hthen helse =>
     cases he
-    have hwfUnion : WellFormedTy _ (.union _ _) :=
-      .union (hasType_wellFormed hwf hΓwf hthen) (hasType_wellFormed hwf hΓwf helse)
     exact .sub
-      (hasType_strengthen_var hthen hwf hlookΓ (.interLeft .refl) hwfNarrow hΓwf)
-      (.unionLeft .refl)
-      hwfUnion
+      (hasType_strengthen_var hthen hlookΓ (.interLeft (.refl (hΓwf _ _ hlookΓ)) (WellFormedTy.class_of_lookup hfindCls)))
+      (.unionLeft (.refl (hasType_wellFormed hwf hΓwf hthen)) (hasType_wellFormed hwf hΓwf helse))
   | condIsInstance hlookΓ' _ hthen helse =>
     cases he
     have heq := Option.some.inj (hlookΓ'.symm.trans hlookΓ)
     subst heq
-    have hmroC := (hwf.allMrosExist _ _ hfindCls).hmro
-    have hΓThen := wellFormedTyEnv_update_class hΓwf hlookΓ hfindCls hmroC
-    have hΓElse := wellFormedTyEnv_update_negClass hΓwf hlookΓ hfindCls hmroC
-    have hwfUnion : WellFormedTy _ (.union _ _) :=
-      .union (hasType_wellFormed hwf hΓThen hthen) (hasType_wellFormed hwf hΓElse helse)
-    exact .sub hthen (.unionLeft .refl) hwfUnion
-  | sub _ hsub hwfU ih =>
-    exact .sub (ih hwf hΓwf hlookΓ hfindCls hwfNarrow he) hsub hwfU
+    have hΓThen := wellFormedTyEnv_update_class hΓwf hlookΓ hfindCls
+    have hΓElse := wellFormedTyEnv_update_negClass hΓwf hlookΓ hfindCls
+    exact .sub hthen
+      (.unionLeft (.refl (hasType_wellFormed hwf hΓThen hthen)) (hasType_wellFormed hwf hΓElse helse))
+  | sub _ hsub ih =>
+    exact .sub (ih hΓwf hlookΓ hfindCls he) hsub
   | interIntro _ _ ih1 ih2 =>
-    exact .interIntro (ih1 hwf hΓwf hlookΓ hfindCls hwfNarrow he)
-      (ih2 hwf hΓwf hlookΓ hfindCls hwfNarrow he)
+    exact .interIntro (ih1 hΓwf hlookΓ hfindCls he)
+      (ih2 hΓwf hlookΓ hfindCls he)
   | _ => exact Expr.noConfusion he
 
 /-- Type the else-branch at the narrowed environment, by induction on the
     original conditional typing. -/
 private theorem condIsInstanceFalse_typing
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
-    (hty : HasType ct Γ (.cond (.isInstance x C) thenBr elseBr) T)
+    (hty : HasType hwf.toWellFormedClassHierarchy Γ (.cond (.isInstance x C) thenBr elseBr) T)
     (hlookΓ : Γ.lookup x = some S)
-    (hfindCls : findClass ct C = some cls)
-    (hwfNarrow : WellFormedTy ct (.intersection S (.negClass C))) :
-    HasType ct (Γ.update x (.intersection S (.negClass C))) elseBr T := by
+    (hfindCls : findClass ct C = some cls) :
+    HasType hwf.toWellFormedClassHierarchy (Γ.update x (.intersection S (.negClass C))) elseBr T := by
   generalize he : Expr.cond (.isInstance x C) thenBr elseBr = e at hty
   induction hty generalizing x C S cls thenBr elseBr with
   | cond _ _ hthen helse =>
     cases he
-    have hwfUnion : WellFormedTy _ (.union _ _) :=
-      .union (hasType_wellFormed hwf hΓwf hthen) (hasType_wellFormed hwf hΓwf helse)
     exact .sub
-      (hasType_strengthen_var helse hwf hlookΓ (.interLeft .refl) hwfNarrow hΓwf)
-      (.unionRight .refl)
-      hwfUnion
+      (hasType_strengthen_var helse hlookΓ (.interLeft (.refl (hΓwf _ _ hlookΓ)) (WellFormedTy.negClass_of_lookup hfindCls)))
+      (.unionRight (.refl (hasType_wellFormed hwf hΓwf helse)) (hasType_wellFormed hwf hΓwf hthen))
   | condIsInstance hlookΓ' _ hthen helse =>
     cases he
     have heq := Option.some.inj (hlookΓ'.symm.trans hlookΓ)
     subst heq
-    have hmroC := (hwf.allMrosExist _ _ hfindCls).hmro
-    have hΓThen := wellFormedTyEnv_update_class hΓwf hlookΓ hfindCls hmroC
-    have hΓElse := wellFormedTyEnv_update_negClass hΓwf hlookΓ hfindCls hmroC
-    have hwfUnion : WellFormedTy _ (.union _ _) :=
-      .union (hasType_wellFormed hwf hΓThen hthen) (hasType_wellFormed hwf hΓElse helse)
-    exact .sub helse (.unionRight .refl) hwfUnion
-  | sub _ hsub hwfU ih =>
-    exact .sub (ih hwf hΓwf hlookΓ hfindCls hwfNarrow he) hsub hwfU
+    have hΓThen := wellFormedTyEnv_update_class hΓwf hlookΓ hfindCls
+    have hΓElse := wellFormedTyEnv_update_negClass hΓwf hlookΓ hfindCls
+    exact .sub helse
+      (.unionRight (.refl (hasType_wellFormed hwf hΓElse helse)) (hasType_wellFormed hwf hΓThen hthen))
+  | sub _ hsub ih =>
+    exact .sub (ih hΓwf hlookΓ hfindCls he) hsub
   | interIntro _ _ ih1 ih2 =>
-    exact .interIntro (ih1 hwf hΓwf hlookΓ hfindCls hwfNarrow he)
-      (ih2 hwf hΓwf hlookΓ hfindCls hwfNarrow he)
+    exact .interIntro (ih1 hΓwf hlookΓ hfindCls he)
+      (ih2 hΓwf hlookΓ hfindCls he)
   | _ => exact Expr.noConfusion he
 
 /-! ## Frame/continuation environment strengthening -/
 
 /-- For non-returnTo frames, the output env equals the input env. -/
 private theorem frame_preserves_env
-    (hf : FrameHasType ct h inΓ inTy outΓ outTy f)
+    (hf : FrameHasType structural h inΓ inTy outΓ outTy f)
     (hne : ∀ e, f ≠ .returnTo e) :
     outΓ = inΓ := by
   induction hf with
   | returnTo _ => exact absurd rfl (hne _)
   | interIntro _ _ _ _ ih1 _ => exact ih1 hne
-  | sub _ _ _ ih => exact ih hne
+  | sub _ _ ih => exact ih hne
   | _ => rfl
 
 /-- A returnTo frame's input env can be freely replaced (it appears only as
     an index, not in any premise). -/
 private theorem frameHasType_returnTo_reindex
-    (hf : FrameHasType ct h inΓ inTy outΓ outTy (Frame.returnTo callerEnv)) :
-    FrameHasType ct h inΓ' inTy outΓ outTy (Frame.returnTo callerEnv) := by
+    (hf : FrameHasType structural h inΓ inTy outΓ outTy (Frame.returnTo callerEnv)) :
+    FrameHasType structural h inΓ' inTy outΓ outTy (Frame.returnTo callerEnv) := by
   generalize hfeq : Frame.returnTo callerEnv = f at hf
   induction hf generalizing inΓ' with
   | returnTo henvR => cases hfeq; exact .returnTo henvR
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
     exact .interIntro (ih1 hfeq) (ih2 hfeq) hwfIn1 hwfIn2
-  | sub _ hsub hwfOut ih => exact .sub (ih hfeq) hsub hwfOut
+  | sub _ hsub ih => exact .sub (ih hfeq) hsub
   | _ => exact Frame.noConfusion hfeq
 
 /-- Strengthen a non-returnTo frame's input environment at a variable.
     Since non-returnTo frames have outΓ = inΓ, both envs are strengthened. -/
 private theorem frameHasType_strengthen_var
     {inΓ outΓ : TyEnv}
-    (hf : FrameHasType ct h inΓ inTy outΓ outTy f)
+    (hf : FrameHasType structural h inΓ inTy outΓ outTy f)
     (hout : outΓ = inΓ)
     (hne : ∀ e, f ≠ Frame.returnTo e)
-    (hwf : WellFormedClassTable ct)
     (hlook : inΓ.lookup z = some oldTy)
-    (hsub : IsSubtype ct newTy oldTy)
-    (hwfNew : WellFormedTy ct newTy)
-    (hΓwf : WellFormedTyEnv ct inΓ) :
-    FrameHasType ct h (inΓ.update z newTy) inTy (inΓ.update z newTy) outTy f := by
+    (hsub : IsSubtype structural newTy oldTy) :
+    FrameHasType structural h (inΓ.update z newTy) inTy (inΓ.update z newTy) outTy f := by
   induction hf with
-  | attrAccess hfmt hsub' hwfOut =>
-    cases hout; exact FrameHasType.attrAccess hfmt hsub' hwfOut
-  | attrAccessUnion hfmt1 hfmt2 hsub' hwfOut =>
-    cases hout; exact FrameHasType.attrAccessUnion hfmt1 hfmt2 hsub' hwfOut
-  | callCallee harg hsub' hwfOut =>
+  | attrAccess hfmt hsub' =>
+    cases hout; exact FrameHasType.attrAccess hfmt hsub'
+  | attrAccessUnion hfmt1 hfmt2 hsub' =>
+    cases hout; exact FrameHasType.attrAccessUnion hfmt1 hfmt2 hsub'
+  | callCallee harg hsub' =>
     cases hout
     exact FrameHasType.callCallee
-      (hasType_strengthen_var harg hwf hlook hsub hwfNew hΓwf)
-      hsub' hwfOut
-  | awaitArgument hlookH hprov hsub' hwfOut =>
-    cases hout; exact FrameHasType.awaitArgument hlookH hprov hsub' hwfOut
-  | cond hthen helse hsub' hwfOut =>
+      (hasType_strengthen_var harg hlook hsub)
+      hsub'
+  | awaitArgument hlookH hprov hsub' =>
+    cases hout; exact FrameHasType.awaitArgument hlookH hprov hsub'
+  | cond hthen helse hsub' =>
     cases hout
     exact FrameHasType.cond
-      (hasType_strengthen_var hthen hwf hlook hsub hwfNew hΓwf)
-      (hasType_strengthen_var helse hwf hlook hsub hwfNew hΓwf)
-      hsub' hwfOut
+      (hasType_strengthen_var hthen hlook hsub)
+      (hasType_strengthen_var helse hlook hsub)
+      hsub'
   | returnTo _ => exact absurd rfl (hne _)
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
     cases hout
-    exact FrameHasType.interIntro (ih1 rfl hne hlook hΓwf)
-      (ih2 rfl hne hlook hΓwf) hwfIn1 hwfIn2
-  | sub _ hsub' hwfOut ih =>
-    exact FrameHasType.sub (ih hout hne hlook hΓwf) hsub' hwfOut
+    exact FrameHasType.interIntro (ih1 rfl hne hlook)
+      (ih2 rfl hne hlook) hwfIn1 hwfIn2
+  | sub _ hsub' ih =>
+    exact FrameHasType.sub (ih hout hne hlook) hsub'
 
 /-- Strengthen a continuation's input environment at a variable. -/
 private theorem continuationHasType_strengthen_var
-    (hk : ContinuationHasType ct h inΓ inTy outΓ outTy k)
-    (hwf : WellFormedClassTable ct)
+    (hk : ContinuationHasType structural h inΓ inTy outΓ outTy k)
     (hlook : inΓ.lookup z = some oldTy)
-    (hsub : IsSubtype ct newTy oldTy)
-    (hwfNew : WellFormedTy ct newTy)
-    (hΓwf : WellFormedTyEnv ct inΓ) :
-    ∃ outΓ', ContinuationHasType ct h (inΓ.update z newTy) inTy outΓ' outTy k := by
+    (hsub : IsSubtype structural newTy oldTy) :
+    ∃ outΓ', ContinuationHasType structural h (inΓ.update z newTy) inTy outΓ' outTy k := by
   induction hk generalizing z oldTy newTy with
   | nil => exact ⟨_, ContinuationHasType.nil⟩
   | cons hf hrest ih =>
@@ -295,8 +283,8 @@ private theorem continuationHasType_strengthen_var
       have heq := frame_preserves_env hf (by intro _ heq; exact Frame.noConfusion heq)
       subst heq
       have hfStrong := frameHasType_strengthen_var hf rfl
-        (by intro _ heq; exact Frame.noConfusion heq) hwf hlook hsub hwfNew hΓwf
-      obtain ⟨outΓ', hrest'⟩ := ih hlook hsub hwfNew hΓwf
+        (by intro _ heq; exact Frame.noConfusion heq) hlook hsub
+      obtain ⟨outΓ', hrest'⟩ := ih hlook hsub
       exact ⟨outΓ', ContinuationHasType.cons hfStrong hrest'⟩
 
 /-! ## Return-rule helpers
@@ -307,260 +295,258 @@ frame type. -/
 
 /-- returnFromBody: value passes through, env restored from returnTo frame. -/
 private theorem returnFromBody_helper
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.returnTo callerEnv))
-    (hval : ValueHasType ct heap v T) :
-    ValueHasType ct heap v midTy ∧ EnvHasType ct heap callerEnv midΓ := by
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.returnTo callerEnv))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap v T) :
+    ValueHasType hwf.toWellFormedClassHierarchy heap v midTy ∧ EnvHasType hwf.toWellFormedClassHierarchy heap callerEnv midΓ := by
   generalize hfeq : Frame.returnTo callerEnv = f at hframe
   induction hframe with
   | returnTo henvR => cases hfeq; exact ⟨hval, henvR⟩
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨hval1, henv1⟩ := ih1 (.sub hval (.interLeft .refl) hwfIn1) hfeq
-    obtain ⟨hval2, _⟩ := ih2 (.sub hval (.interRight .refl) hwfIn2) hfeq
+    obtain ⟨hval1, henv1⟩ := ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) hfeq
+    obtain ⟨hval2, _⟩ := ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1)) hfeq
     exact ⟨.interIntro hval1 hval2
       (.intersection (valueHasType_wellFormed hwf hheap hval1)
         (valueHasType_wellFormed hwf hheap hval2)), henv1⟩
-  | sub _ hsub hwfOut ih =>
+  | sub _ hsub ih =>
     obtain ⟨hval', henv'⟩ := ih hval hfeq
-    exact ⟨.sub hval' hsub hwfOut, henv'⟩
+    exact ⟨.sub hval' hsub, henv'⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnCondTrue: select then branch from cond frame. -/
 private theorem returnCondTrue_helper
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
-    (hval : ValueHasType ct heap (Value.objRef trueOid) T)
-    (henv : EnvHasType ct heap env Γ) :
-    HasType ct midΓ thenBr midTy ∧ EnvHasType ct heap env midΓ := by
+    (hframe : FrameHasType structural heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
+    (hval : ValueHasType structural heap (Value.objRef trueOid) T)
+    (henv : EnvHasType structural heap env Γ) :
+    HasType structural midΓ thenBr midTy ∧ EnvHasType structural heap env midΓ := by
   generalize hfeq : Frame.cond thenBr elseBr = f at hframe
   induction hframe with
-  | cond hthen _ hsubR hwfOut => cases hfeq; exact ⟨.sub hthen hsubR hwfOut, henv⟩
+  | cond hthen _ hsubR => cases hfeq; exact ⟨.sub hthen hsubR, henv⟩
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨h1, henv1⟩ := ih1 (.sub hval (.interLeft .refl) hwfIn1) henv hfeq
-    obtain ⟨h2, _⟩ := ih2 (.sub hval (.interRight .refl) hwfIn2) henv hfeq
+    obtain ⟨h1, henv1⟩ := ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) henv hfeq
+    obtain ⟨h2, _⟩ := ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1)) henv hfeq
     exact ⟨.interIntro h1 h2, henv1⟩
-  | sub _ hsub hwfOut ih =>
+  | sub _ hsub ih =>
     obtain ⟨h, henv'⟩ := ih hval henv hfeq
-    exact ⟨.sub h hsub hwfOut, henv'⟩
+    exact ⟨.sub h hsub, henv'⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnCondFalse: select else branch from cond frame. -/
 private theorem returnCondFalse_helper
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
-    (hval : ValueHasType ct heap (Value.objRef falseOid) T)
-    (henv : EnvHasType ct heap env Γ) :
-    HasType ct midΓ elseBr midTy ∧ EnvHasType ct heap env midΓ := by
+    (hframe : FrameHasType structural heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
+    (hval : ValueHasType structural heap (Value.objRef falseOid) T)
+    (henv : EnvHasType structural heap env Γ) :
+    HasType structural midΓ elseBr midTy ∧ EnvHasType structural heap env midΓ := by
   generalize hfeq : Frame.cond thenBr elseBr = f at hframe
   induction hframe with
-  | cond _ helse hsubR hwfOut => cases hfeq; exact ⟨.sub helse hsubR hwfOut, henv⟩
+  | cond _ helse hsubR => cases hfeq; exact ⟨.sub helse hsubR, henv⟩
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨h1, henv1⟩ := ih1 (.sub hval (.interLeft .refl) hwfIn1) henv hfeq
-    obtain ⟨h2, _⟩ := ih2 (.sub hval (.interRight .refl) hwfIn2) henv hfeq
+    obtain ⟨h1, henv1⟩ := ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) henv hfeq
+    obtain ⟨h2, _⟩ := ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1)) henv hfeq
     exact ⟨.interIntro h1 h2, henv1⟩
-  | sub _ hsub hwfOut ih =>
+  | sub _ hsub ih =>
     obtain ⟨h, henv'⟩ := ih hval henv hfeq
-    exact ⟨.sub h hsub hwfOut, henv'⟩
+    exact ⟨.sub h hsub, henv'⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnCondNotBool: contradiction — the cond value must be true or false. -/
 private theorem returnCondNotBool_helper
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
-    (hval : ValueHasType ct heap (Value.objRef condOid) T)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.cond thenBr elseBr))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap (Value.objRef condOid) T)
     (hneTrue : condOid ≠ trueOid)
     (hneFalse : condOid ≠ falseOid) : False := by
   generalize hfeq : Frame.cond thenBr elseBr = f at hframe
   induction hframe with
-  | cond _ _ _ _ =>
+  | cond _ _ _ =>
     cases hfeq
     -- T = .class_ boolClass, so condOid must be trueOid or falseOid
-    obtain ⟨obj, hlookActual⟩ := objRef_has_heap_entry hval
-    obtain ⟨cls, c_mro, hfind_c, hmro_c⟩ := hheap.classesExist _ _ hlookActual
-    have hsubClass := objRef_class_subtype hheap hval IsSubtype.refl hlookActual hfind_c hmro_c
+    obtain ⟨_, hlookActual⟩ := objRef_has_heap_entry hval
+    obtain ⟨_, _, hfind_c, hmro_c⟩ := hheap.classesExist _ _ hlookActual
+    have hsubClass := objRef_class_subtype hwf hheap hval hlookActual hfind_c hmro_c
     have hbool := bool_subtype_is_bool hwf hsubClass hfind_c hmro_c
     rcases hheap.boolExhaustive _ _ hlookActual hbool with rfl | rfl
     · exact hneTrue rfl
     · exact hneFalse rfl
-  | interIntro _ _ hwfIn1 _ ih1 _ =>
-    exact ih1 (.sub hval (.interLeft .refl) hwfIn1) hfeq
-  | sub _ _ _ ih => exact ih hval hfeq
+  | interIntro _ _ hwfIn1 hwfIn2 ih1 _ =>
+    exact ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) hfeq
+  | sub _ _ ih => exact ih hval hfeq
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnAttrAccess: allocate bound method and produce the typed result. -/
 private theorem returnAttrAccess_helper
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.attrAccess attrName))
-    (hval : ValueHasType ct heap (Value.objRef objOid) T)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.attrAccess attrName))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap (Value.objRef objOid) T)
     (hlookObj : heap.lookup objOid = some obj)
     (hfindClass : findClass ct obj.className = some c)
     (hmroEval : ComputeMro ct c mro)
     (hmethodEval : findMethodInMro ct mro attrName = some m)
     (halloc : heap.alloc ⟨boundMethodClass, ObjectPayload.boundMethod objOid m⟩ = (bmOid, heap'))
-    (henv : EnvHasType ct heap env Γ) :
-    ValueHasType ct heap' (Value.objRef bmOid) midTy ∧
-    EnvHasType ct heap' env midΓ ∧
+    (henv : EnvHasType hwf.toWellFormedClassHierarchy heap env Γ) :
+    ValueHasType hwf.toWellFormedClassHierarchy heap' (Value.objRef bmOid) midTy ∧
+    EnvHasType hwf.toWellFormedClassHierarchy heap' env midΓ ∧
     HeapWellFormed ct heap' := by
   have hmono : ∀ {oid' obj'}, heap.lookup oid' = some obj' → heap'.lookup oid' = some obj' :=
     fun hlk => heap_alloc_preserves_old hheap.idsBounded halloc hlk
   have hlookBM := heap_alloc_lookup_new halloc
-  have hmethodInMro := method_in_receiver_mro_of_lookup hfindClass hmroEval hmethodEval
   generalize hfeq : Frame.attrAccess attrName = f at hframe
   induction hframe generalizing hlookObj hfindClass hmroEval hmethodEval halloc with
-  | attrAccess hfmt hsub hwfOut =>
+  | attrAccess hfmt hsub =>
     cases hfeq
-    have hsubClass := objRef_class_subtype hheap hval IsSubtype.refl hlookObj hfindClass hmroEval
-    have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf.liskovCondition
+    have hsubClass := objRef_class_subtype hwf hheap hval hlookObj hfindClass hmroEval
+    have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf
       hfmt hsubClass hfindClass hmroEval hmethodEval
-    have ⟨hp, hr⟩ := findMethodType_wellFormed hwf hfmt
     have hheap' := step_preserves_heapWellFormed
       (s := { heap, env := [], control := Control.val (Value.objRef objOid),
               continuation := [Frame.attrAccess attrName] })
       (Step.returnAttrAccess hlookObj hfindClass hmroEval hmethodEval halloc) hheap hwf
-    exact ⟨ValueHasType.sub (ValueHasType.sub (ValueHasType.objRefCallable hlookBM (hmono hlookObj) hmethodInMro)
-      (IsSubtype.callable hpvar hrvar) (WellFormedTy.callable hp hr)) hsub hwfOut,
+    exact ⟨ValueHasType.sub (ValueHasType.sub (ValueHasType.objRefCallable hlookBM)
+      (IsSubtype.callable hpvar hrvar)) hsub,
       env_has_type_mono henv hmono, hheap'⟩
-  | attrAccessUnion hfmt1 hfmt2 hsub hwfOut =>
+  | attrAccessUnion hfmt1 hfmt2 hsub =>
     cases hfeq
-    have hbm := ValueHasType.objRefCallable hlookBM (hmono hlookObj) hmethodInMro
-    have ⟨hp1, hr1⟩ := findMethodType_wellFormed hwf hfmt1
-    have ⟨hp2, hr2⟩ := findMethodType_wellFormed hwf hfmt2
-    have hwfU := WellFormedTy.union (WellFormedTy.callable hp1 hr1) (WellFormedTy.callable hp2 hr2)
+    have hbm := ValueHasType.objRefCallable (structural := hwf.toWellFormedClassHierarchy) hlookBM
     have hheap' := step_preserves_heapWellFormed
       (s := { heap, env := [], control := Control.val (Value.objRef objOid),
               continuation := [Frame.attrAccess attrName] })
       (Step.returnAttrAccess hlookObj hfindClass hmroEval hmethodEval halloc) hheap hwf
-    rcases objRef_union_class_decompose hheap hval hlookObj hfindClass hmroEval with hsub1 | hsub2
-    · have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf.liskovCondition
+    rcases objRef_union_class_decompose hwf hheap hval hlookObj hfindClass hmroEval with hsub1 | hsub2
+    · have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf
         hfmt1 hsub1 hfindClass hmroEval hmethodEval
-      exact ⟨ValueHasType.sub (ValueHasType.sub hbm (IsSubtype.callable hpvar hrvar) (WellFormedTy.callable hp1 hr1))
-        (IsSubtype.trans (IsSubtype.unionLeft IsSubtype.refl) hsub) hwfOut,
+      exact ⟨ValueHasType.sub (ValueHasType.sub hbm (IsSubtype.callable hpvar hrvar))
+        (subtype_union_iff.mp hsub).1,
         env_has_type_mono henv hmono, hheap'⟩
-    · have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf.liskovCondition
+    · have ⟨hpvar, hrvar⟩ := typed_method_variance_on_runtime_receiver hwf
         hfmt2 hsub2 hfindClass hmroEval hmethodEval
-      exact ⟨ValueHasType.sub (ValueHasType.sub hbm (IsSubtype.callable hpvar hrvar) (WellFormedTy.callable hp2 hr2))
-        (IsSubtype.trans (IsSubtype.unionRight IsSubtype.refl) hsub) hwfOut,
+      exact ⟨ValueHasType.sub (ValueHasType.sub hbm (IsSubtype.callable hpvar hrvar))
+        (subtype_union_iff.mp hsub).2,
         env_has_type_mono henv hmono, hheap'⟩
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨hval1, henv1, hheap1⟩ := ih1 (.sub hval (.interLeft .refl) hwfIn1) hlookObj hfindClass hmroEval hmethodEval halloc henv hfeq
-    obtain ⟨hval2, _, _⟩ := ih2 (.sub hval (.interRight .refl) hwfIn2) hlookObj hfindClass hmroEval hmethodEval halloc henv hfeq
+    obtain ⟨hval1, henv1, hheap1⟩ := ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2))
+      hlookObj hfindClass hmroEval hmethodEval halloc henv hfeq
+    obtain ⟨hval2, _, _⟩ := ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1))
+      hlookObj hfindClass hmroEval hmethodEval halloc henv hfeq
     exact ⟨.interIntro hval1 hval2
       (.intersection (valueHasType_wellFormed hwf hheap1 hval1)
         (valueHasType_wellFormed hwf hheap1 hval2)), henv1, hheap1⟩
-  | sub _ hsub hwfOut ih =>
+  | sub _ hsub ih =>
     obtain ⟨hval', henv', hheap'⟩ := ih hval hlookObj hfindClass hmroEval hmethodEval halloc henv hfeq
-    exact ⟨.sub hval' hsub hwfOut, henv', hheap'⟩
+    exact ⟨.sub hval' hsub, henv', hheap'⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnAttrAccessNotFound: contradiction — typed method must exist. -/
 private theorem returnAttrAccessNotFound_helper
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.attrAccess attrName))
-    (hval : ValueHasType ct heap (Value.objRef objOid) T)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.attrAccess attrName))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap (Value.objRef objOid) T)
     (hlookObj : heap.lookup objOid = some obj)
     (hfindClass : findClass ct obj.className = some c)
     (hmroEval : ComputeMro ct c mro)
     (hmethodNotFound : findMethodInMro ct mro attrName = none) : False := by
   generalize hfeq : Frame.attrAccess attrName = f at hframe
   induction hframe generalizing hlookObj hfindClass hmroEval hmethodNotFound with
-  | attrAccess hfmt _ _ =>
+  | attrAccess hfmt _ =>
     cases hfeq
-    have hsubClass := objRef_class_subtype hheap hval IsSubtype.refl hlookObj hfindClass hmroEval
-    obtain ⟨m, hm⟩ := typed_method_exists_on_runtime_receiver hfmt hsubClass hfindClass hmroEval
+    have hsubClass := objRef_class_subtype hwf hheap hval hlookObj hfindClass hmroEval
+    obtain ⟨_, hm⟩ := typed_method_exists_on_runtime_receiver hwf hfmt hsubClass hfindClass hmroEval
     simp [hmethodNotFound] at hm
-  | attrAccessUnion hfmt1 hfmt2 _ _ =>
+  | attrAccessUnion hfmt1 hfmt2 _ =>
     cases hfeq
-    rcases objRef_union_class_decompose hheap hval hlookObj hfindClass hmroEval with hsub1 | hsub2
-    · obtain ⟨m, hm⟩ := typed_method_exists_on_runtime_receiver hfmt1 hsub1 hfindClass hmroEval
+    rcases objRef_union_class_decompose hwf hheap hval hlookObj hfindClass hmroEval with hsub1 | hsub2
+    · obtain ⟨_, hm⟩ := typed_method_exists_on_runtime_receiver hwf hfmt1 hsub1 hfindClass hmroEval
       simp [hmethodNotFound] at hm
-    · obtain ⟨m, hm⟩ := typed_method_exists_on_runtime_receiver hfmt2 hsub2 hfindClass hmroEval
+    · obtain ⟨_, hm⟩ := typed_method_exists_on_runtime_receiver hwf hfmt2 hsub2 hfindClass hmroEval
       simp [hmethodNotFound] at hm
-  | interIntro _ _ hwfIn1 _ ih1 _ =>
-    exact ih1 (.sub hval (.interLeft .refl) hwfIn1) hlookObj hfindClass hmroEval hmethodNotFound hfeq
-  | sub _ _ _ ih => exact ih hval hlookObj hfindClass hmroEval hmethodNotFound hfeq
+  | interIntro _ _ hwfIn1 hwfIn2 ih1 _ =>
+    exact ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) hlookObj hfindClass hmroEval hmethodNotFound hfeq
+  | sub _ _ ih => exact ih hval hlookObj hfindClass hmroEval hmethodNotFound hfeq
   | _ => exact Frame.noConfusion hfeq
 
-/-- returnCallCallee: extract arg typing and return subtype for awaitArgument. -/
+/-- Preserve the required input and declared function-type evidence while the argument evaluates. -/
 private theorem returnCallCallee_helper
-    (hwf : WellFormedClassTable ct)
-    (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.callCallee arg))
-    (hval : ValueHasType ct heap (Value.objRef calleeOid) T)
-    (hlookCallee : heap.lookup calleeOid = some ⟨calleeClassName, ObjectPayload.boundMethod recvOid m⟩)
-    (henv : EnvHasType ct heap env Γ) :
-    HasType ct midΓ arg m.paramTy ∧
-    IsSubtype ct m.returnTy midTy ∧
-    WellFormedTy ct midTy ∧
-    EnvHasType ct heap env midΓ := by
+    (hwf : WellTypedClassHierarchy ct) (hheap : HeapWellFormed ct heap)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.callCallee arg))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap (Value.objRef calleeOid) T)
+    (hlookCallee : heap.lookup calleeOid = some ⟨calleeClassName, .boundMethod recvOid m⟩)
+    (henv : EnvHasType hwf.toWellFormedClassHierarchy heap env Γ) :
+    ∃ requiredInput, HasType hwf.toWellFormedClassHierarchy midΓ arg requiredInput ∧
+      FrameHasType hwf.toWellFormedClassHierarchy heap midΓ requiredInput midΓ midTy (.awaitArgument recvOid m) ∧
+      EnvHasType hwf.toWellFormedClassHierarchy heap env midΓ := by
   generalize hfeq : Frame.callCallee arg = f at hframe
   induction hframe generalizing hlookCallee with
-  | callCallee harg hsub hwfOut =>
+  | callCallee harg hsub =>
     cases hfeq
     obtain ⟨_, _, _, hlookBM, hlookRecv, hprov, hsubCallable⟩ :=
-      objRef_callable_provenance hheap hval IsSubtype.refl
+      objRef_callable_provenance hwf hheap hval
     obtain ⟨_, hrec, hmethod⟩ := unify_payload hlookBM hlookCallee
     subst hrec; subst hmethod
-    obtain ⟨bmCls, bmMro, hBMFind, hBMMro⟩ := hwf.boundMethodExists
-    obtain ⟨hsubParam, hsubReturn⟩ := callable_subtype_inv hBMFind hBMMro hsubCallable
-    obtain ⟨recvCls, recvMro, hfindRecv, hmroRecv, hmethodRecv⟩ := hprov
-    obtain ⟨dname, d, _, hfindd, hmem⟩ := findMethodInMro_provenance hmethodRecv
-    have ⟨hwfP, _⟩ := hwf.allMethodSignaturesWellFormed dname d _ hfindd hmem
-    exact ⟨.sub harg hsubParam hwfP, .trans hsubReturn hsub, hwfOut, henv⟩
+    have hwfInput := hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) harg
+    exact ⟨_, harg, .awaitArgument hlookRecv hprov
+      (.trans hsubCallable (.callable (.refl hwfInput) hsub)), henv⟩
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨harg1, hsub1, hwf1, henv1⟩ := ih1 (.sub hval (.interLeft .refl) hwfIn1) hlookCallee henv hfeq
-    obtain ⟨_, hsub2, hwf2, _⟩ := ih2 (.sub hval (.interRight .refl) hwfIn2) hlookCallee henv hfeq
-    exact ⟨harg1, .interIntro hsub1 hsub2, .intersection hwf1 hwf2, henv1⟩
-  | sub _ hsub hwfOut ih =>
-    obtain ⟨harg', hsub', _, henv'⟩ := ih hval hlookCallee henv hfeq
-    exact ⟨harg', .trans hsub' hsub, hwfOut, henv'⟩
+    obtain ⟨Q1, harg1, pending1, henv1⟩ := ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) hlookCallee henv hfeq
+    obtain ⟨Q2, harg2, pending2, _⟩ := ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1)) hlookCallee henv hfeq
+    exact ⟨.intersection Q1 Q2, .interIntro harg1 harg2,
+      .interIntro pending1 pending2
+        (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv1) harg1)
+        (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv1) harg2), henv1⟩
+  | sub _ hsub ih =>
+    obtain ⟨Q, harg, pending, henv⟩ := ih hval hlookCallee henv hfeq
+    exact ⟨Q, harg, .sub pending hsub, henv⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnCallNotInvokable: contradiction — callable must be bound method. -/
 private theorem returnCallNotInvokable_helper
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.callCallee arg))
-    (hval : ValueHasType ct heap (Value.objRef calleeOid) T)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.callCallee arg))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap (Value.objRef calleeOid) T)
     (hlookCallee : heap.lookup calleeOid = some ⟨calleeClassName, ObjectPayload.ordinary⟩) : False := by
   generalize hfeq : Frame.callCallee arg = f at hframe
   induction hframe generalizing hlookCallee with
-  | callCallee _ _ _ =>
+  | callCallee _ _ =>
     cases hfeq
-    obtain ⟨_, _, _, _, heq, hlookBM, _, _⟩ := canonical_callable hheap hval
+    obtain ⟨_, _, _, _, heq, hlookBM, _, _⟩ := canonical_callable hwf hheap hval
     simp at heq; subst heq
     exact payload_absurd hlookBM hlookCallee
-  | interIntro _ _ hwfIn1 _ ih1 _ =>
-    exact ih1 (.sub hval (.interLeft .refl) hwfIn1) hlookCallee hfeq
-  | sub _ _ _ ih => exact ih hval hlookCallee hfeq
+  | interIntro _ _ hwfIn1 hwfIn2 ih1 _ =>
+    exact ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) hlookCallee hfeq
+  | sub _ _ ih => exact ih hval hlookCallee hfeq
   | _ => exact Frame.noConfusion hfeq
 
 /-- returnAwaitArgument: construct body env and typing, push returnTo frame. -/
 private theorem returnAwaitArgument_helper
-    (hwf : WellFormedClassTable ct)
-    (hframe : FrameHasType ct heap Γ T midΓ midTy (Frame.awaitArgument recvOid m))
-    (hval : ValueHasType ct heap argVal T)
-    (henv : EnvHasType ct heap env Γ) :
+    (hwf : WellTypedClassHierarchy ct) (hheap : HeapWellFormed ct heap)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T midΓ midTy (Frame.awaitArgument recvOid m))
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap argVal T)
+    (henv : EnvHasType hwf.toWellFormedClassHierarchy heap env Γ) :
     (∃ bodyΓ,
-      EnvHasType ct heap [(m.param, argVal), (m.receiverParam, Value.objRef recvOid)] bodyΓ ∧
-      HasType ct bodyΓ m.body m.returnTy) ∧
-    IsSubtype ct m.returnTy midTy ∧
-    WellFormedTy ct midTy ∧
-    EnvHasType ct heap env midΓ := by
+      EnvHasType hwf.toWellFormedClassHierarchy heap [(m.param, argVal), (m.receiverParam, Value.objRef recvOid)] bodyΓ ∧
+      HasType hwf.toWellFormedClassHierarchy bodyΓ m.body m.returnTy) ∧
+    IsSubtype hwf.toWellFormedClassHierarchy m.returnTy midTy ∧
+    EnvHasType hwf.toWellFormedClassHierarchy heap env midΓ := by
   generalize hfeq : Frame.awaitArgument recvOid m = f at hframe
   induction hframe with
-  | awaitArgument hlookRecv hprov hsub hwfOut =>
+  | awaitArgument hlookRecv hprov hsub =>
     cases hfeq
-    obtain ⟨recvCls, recvMro, hfindRecv, hmroRecv, hmethodRecv⟩ := hprov
+    obtain ⟨_, _, hfindRecv, hmroRecv, hmethodRecv⟩ := hprov
     obtain ⟨dname, d, hdmem, hfindd, hmethods⟩ := findMethodInMro_provenance hmethodRecv
     have hbodyType := hwf.allMethodsWellTyped dname d m hfindd hmethods
-    have ⟨hwfP, _⟩ := hwf.allMethodSignaturesWellFormed dname d m hfindd hmethods
-    refine ⟨⟨_, ?_, hbodyType⟩, hsub, hwfOut, henv⟩
+    have hsubParam := callable_domain_subtype hsub
+    have hvalParam := ValueHasType.sub hval hsubParam
+    refine ⟨⟨_, ?_, hbodyType⟩,
+      callable_return_subtype hsub (valueHasType_nonempty hwf hheap hval), henv⟩
     intro y Ty hlookBody
     by_cases hyParam : y = m.param
     · subst hyParam
       simp [NamedEnv.lookup] at hlookBody
       cases hlookBody
-      exact ⟨_, by simp [NamedEnv.lookup], hval⟩
+      exact ⟨_, by simp [NamedEnv.lookup], hvalParam⟩
     · have hparamy : m.param ≠ y := by
         intro hEq
         exact hyParam hEq.symm
@@ -580,26 +566,25 @@ private theorem returnAwaitArgument_helper
           simp [NamedEnv.lookup, hparamy, hrecvy] at hlookBody
         exact False.elim this
   | interIntro _ _ hwfIn1 hwfIn2 ih1 ih2 =>
-    obtain ⟨⟨bodyΓ1, henvBody1, hbody1⟩, hsub1, hwf1, henvMid1⟩ :=
-      ih1 (.sub hval (.interLeft .refl) hwfIn1) henv hfeq
-    obtain ⟨_, hsub2, hwf2, _⟩ :=
-      ih2 (.sub hval (.interRight .refl) hwfIn2) henv hfeq
-    exact ⟨⟨bodyΓ1, henvBody1, hbody1⟩, .interIntro hsub1 hsub2,
-      .intersection hwf1 hwf2, henvMid1⟩
-  | sub _ hsub hwfOut ih =>
-    obtain ⟨hbody, hsub', _, henvMid⟩ := ih hval henv hfeq
-    exact ⟨hbody, .trans hsub' hsub, hwfOut, henvMid⟩
+    obtain ⟨⟨bodyΓ1, henvBody1, hbody1⟩, hsub1, henvMid1⟩ :=
+      ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2)) henv hfeq
+    obtain ⟨_, hsub2, _⟩ :=
+      ih2 (.sub hval (.interRight (.refl hwfIn2) hwfIn1)) henv hfeq
+    exact ⟨⟨bodyΓ1, henvBody1, hbody1⟩, .interIntro hsub1 hsub2, henvMid1⟩
+  | sub _ hsub ih =>
+    obtain ⟨hbody, hsub', henvMid⟩ := ih hval henv hfeq
+    exact ⟨hbody, .trans hsub' hsub, henvMid⟩
   | _ => exact Frame.noConfusion hfeq
 
 /-! ## One-step preservation -/
 
 /-- One-step preservation: if a safe state takes a step, the result is safe. -/
 theorem preservation
-    (hwf : WellFormedClassTable ct)
-    (hsafe : StateSafe ct heap env ctrl cont expectedType)
+    (hwf : WellTypedClassHierarchy ct)
+    (hsafe : StateSafe hwf.toWellFormedClassHierarchy heap env ctrl cont expectedType)
     (hstep : Step ct { heap, env, control := ctrl, continuation := cont }
                      { heap := heap', env := env', control := ctrl', continuation := cont' }) :
-    StateSafe ct heap' env' ctrl' cont' expectedType := by
+    StateSafe hwf.toWellFormedClassHierarchy heap' env' ctrl' cont' expectedType := by
   obtain ⟨Γ, outΓ, T, hheap, henv, hctrl, hcont⟩ := hsafe
   cases hstep with
   -- Focus rules: push a frame, control becomes a subexpression
@@ -626,74 +611,69 @@ theorem preservation
     cases hctrl with
     | expr hty =>
       have hΓwf := envHasType_wellFormedTyEnv hwf hheap henv
-      obtain ⟨S, _, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv hty
-      obtain ⟨cmro, hcmro⟩ := hwf.allMrosExist _ _ hfindCls
+      obtain ⟨_, _, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv hty
       have hwfS := hΓwf _ _ hlookΓ
-      have hwfC := WellFormedTy.class_ hfindCls hcmro
-      have hwfNarrow := WellFormedTy.intersection hwfS hwfC
+      have hwfC := WellFormedTy.class_of_lookup hfindCls
       -- Type thenBr at narrowed env
-      have hthen := condIsInstanceTrue_typing hwf hΓwf hty hlookΓ hfindCls hwfNarrow
+      have hthen := condIsInstanceTrue_typing hwf hΓwf hty hlookΓ hfindCls
       -- Narrow the runtime env
       have henv' := env_has_type_narrow henv hlookΓ (fun v hv => by
         have := Option.some.inj (hv.symm.trans henvLook); subst this
         obtain ⟨_, hv', hvt⟩ := henv _ _ hlookΓ
         have := Option.some.inj (hv'.symm.trans henvLook); subst this
         exact .interIntro hvt
-          (.objRef hlookObj (.class_ hfindClass hmroEval hmem)) hwfNarrow)
+          (.objRef hlookObj (.class_ hfindClass hmroEval hmem)) (.intersection hwfS hwfC))
       -- Strengthen the continuation
-      obtain ⟨outΓ', hcont'⟩ := continuationHasType_strengthen_var hcont hwf
-        hlookΓ (.interLeft .refl) hwfNarrow hΓwf
+      obtain ⟨outΓ', hcont'⟩ := continuationHasType_strengthen_var hcont
+        hlookΓ (.interLeft (.refl hwfS) hwfC)
       exact ⟨_, outΓ', T, hheap, henv', .expr hthen, hcont'⟩
   | condIsInstanceFalse henvLook hlookObj hfindClass hmroEval hnotmem =>
     cases hctrl with
     | expr hty =>
       have hΓwf := envHasType_wellFormedTyEnv hwf hheap henv
-      obtain ⟨S, _, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv hty
-      obtain ⟨cmro, hcmro⟩ := hwf.allMrosExist _ _ hfindCls
+      obtain ⟨_, _, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv hty
       have hwfS := hΓwf _ _ hlookΓ
-      have hwfNegC := WellFormedTy.negClass hfindCls hcmro
-      have hwfNarrow := WellFormedTy.intersection hwfS hwfNegC
+      have hwfNegC := WellFormedTy.negClass_of_lookup hfindCls
       -- Type elseBr at narrowed env
-      have helse := condIsInstanceFalse_typing hwf hΓwf hty hlookΓ hfindCls hwfNarrow
+      have helse := condIsInstanceFalse_typing hwf hΓwf hty hlookΓ hfindCls
       -- Narrow the runtime env
       have henv' := env_has_type_narrow henv hlookΓ (fun v hv => by
         have := Option.some.inj (hv.symm.trans henvLook); subst this
         obtain ⟨_, hv', hvt⟩ := henv _ _ hlookΓ
         have := Option.some.inj (hv'.symm.trans henvLook); subst this
         exact .interIntro hvt
-          (.objRefNegClass hlookObj hwfNegC hfindClass hmroEval hnotmem) hwfNarrow)
+          (.objRefNegClass hlookObj hwfNegC hfindClass hmroEval hnotmem) (.intersection hwfS hwfNegC))
       -- Strengthen the continuation
-      obtain ⟨outΓ', hcont'⟩ := continuationHasType_strengthen_var hcont hwf
-        hlookΓ (.interLeft .refl) hwfNarrow hΓwf
+      obtain ⟨outΓ', hcont'⟩ := continuationHasType_strengthen_var hcont
+        hlookΓ (.interLeft (.refl hwfS) hwfNegC)
       exact ⟨_, outΓ', T, hheap, henv', .expr helse, hcont'⟩
   | condIsInstanceVarNotFound henvLook =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨S, _, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv hty
-      obtain ⟨v, henvLookV, _⟩ := henv _ _ hlookΓ
+      obtain ⟨_, _, hlookΓ, _⟩ := has_type_cond_isInstance_inv hty
+      obtain ⟨_, henvLookV, _⟩ := henv _ _ hlookΓ
       exact absurd (henvLook.symm.trans henvLookV) (by simp)
   -- Variable lookup
   | varSuccess hlook =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨T', hlookΓ, hsub⟩ := has_type_var_inv hty
-      obtain ⟨v, henvLook, hval⟩ := henv _ _ hlookΓ
+      obtain ⟨_, hlookΓ, hsub⟩ := has_type_var_inv hty (envHasType_wellFormedTyEnv hwf hheap henv)
+      obtain ⟨_, henvLook, hval⟩ := henv _ _ hlookΓ
       have := Option.some.inj (henvLook.symm.trans hlook); subst this
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub hval hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub hval hsub),
         hcont⟩
   | varError hlook =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨T', hlookΓ, _⟩ := has_type_var_inv hty
-      obtain ⟨v, henvLook, _⟩ := henv _ _ hlookΓ
+      obtain ⟨_, hlookΓ, _⟩ := has_type_var_inv hty (envHasType_wellFormedTyEnv hwf hheap henv)
+      obtain ⟨_, henvLook, _⟩ := henv _ _ hlookΓ
       exact absurd (hlook.symm.trans henvLook) (by simp)
   -- New object
   | newSuccess hfind hne1 hne2 hne3 halloc =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨c, hfind', _, _, _, hsub⟩ := has_type_new_inv hty
+      obtain ⟨_, _, _, _, _, hsub⟩ := has_type_new_inv hty
       have hmono : ∀ {oid obj}, heap.lookup oid = some obj → heap'.lookup oid = some obj :=
         fun hlk => heap_alloc_preserves_old hheap.idsBounded halloc hlk
       have hheap' : HeapWellFormed ct heap' :=
@@ -703,18 +683,17 @@ theorem preservation
       have hlookNew := heap_alloc_lookup_new halloc
       exact ⟨Γ, outΓ, T, hheap',
         env_has_type_mono henv hmono,
-        .val (.sub (.objRef hlookNew .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hlookNew (.refl hsub.sourceWellFormed)) hsub),
         continuationHasType_mono hcont hmono⟩
   | newClassNotFound hfind =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨c, hfind', _, _, _, _⟩ := has_type_new_inv hty
+      obtain ⟨_, hfind', _, _, _, _⟩ := has_type_new_inv hty
       exact absurd (hfind.symm.trans hfind') (by simp)
-  | newBuiltinError hfind hbuiltin =>
+  | newBuiltinError _ hbuiltin =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨c, _, hne1, hne2, hne3, _⟩ := has_type_new_inv hty
+      obtain ⟨_, _, hne1, hne2, hne3, _⟩ := has_type_new_inv hty
       rcases hbuiltin with rfl | rfl | rfl
       · exact absurd rfl hne1
       · exact absurd rfl hne2
@@ -725,47 +704,42 @@ theorem preservation
     | expr hty =>
       have hsub := has_type_constNone_inv hty
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub (.objRef hheap.initialNone .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hheap.initialNone (.refl (WellFormedTy.none hwf.toWellFormedClassHierarchy))) hsub),
         hcont⟩
   | constTrue =>
     cases hctrl with
     | expr hty =>
       have hsub := has_type_constTrue_inv hty
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub (.objRef hheap.initialTrue .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hheap.initialTrue (.refl (WellFormedTy.bool hwf.toWellFormedClassHierarchy))) hsub),
         hcont⟩
   | constFalse =>
     cases hctrl with
     | expr hty =>
       have hsub := has_type_constFalse_inv hty
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub (.objRef hheap.initialFalse .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hheap.initialFalse (.refl (WellFormedTy.bool hwf.toWellFormedClassHierarchy))) hsub),
         hcont⟩
   -- isInstance
-  | isInstanceTrue henvLook hlookObj hfindClass hmroEval hmem =>
+  | isInstanceTrue =>
     cases hctrl with
     | expr hty =>
       have hsub := (has_type_isInstance_inv hty).2.2
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub (.objRef hheap.initialTrue .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hheap.initialTrue (.refl (WellFormedTy.bool hwf.toWellFormedClassHierarchy))) hsub),
         hcont⟩
-  | isInstanceFalse henvLook hlookObj hfindClass hmroEval hnotmem =>
+  | isInstanceFalse =>
     cases hctrl with
     | expr hty =>
       have hsub := (has_type_isInstance_inv hty).2.2
       exact ⟨Γ, outΓ, T, hheap, henv,
-        .val (.sub (.objRef hheap.initialFalse .refl) hsub
-          (hasType_wellFormed hwf (envHasType_wellFormedTyEnv hwf hheap henv) hty)),
+        .val (.sub (.objRef hheap.initialFalse (.refl (WellFormedTy.bool hwf.toWellFormedClassHierarchy))) hsub),
         hcont⟩
   | isInstanceVarNotFound henvLook =>
     cases hctrl with
     | expr hty =>
-      obtain ⟨⟨T', hlookΓ⟩, _, _⟩ := has_type_isInstance_inv hty
-      obtain ⟨v, henvLookV, _⟩ := henv _ _ hlookΓ
+      obtain ⟨⟨_, hlookΓ⟩, _, _⟩ := has_type_isInstance_inv hty
+      obtain ⟨_, henvLookV, _⟩ := henv _ _ hlookΓ
       exact absurd (henvLook.symm.trans henvLookV) (by simp)
   -- Return rules
   | returnAttrAccess hlookObj hfindClass hmroEval hmethodEval halloc =>
@@ -783,33 +757,32 @@ theorem preservation
     | val hval =>
       cases hcont with
       | cons hframe hrest =>
-        exact absurd (returnAttrAccessNotFound_helper hheap hframe hval
+        exact absurd (returnAttrAccessNotFound_helper hwf hheap hframe hval
           hlookObj hfindClass hmroEval hmethodNotFound) id
   | returnCallCallee hlookCallee =>
     cases hctrl with
     | val hval =>
       cases hcont with
       | cons hframe hrest =>
-        obtain ⟨harg, hsubRet, hwfMidTy, henvMid⟩ :=
+        obtain ⟨_, harg, pending, henvMid⟩ :=
           returnCallCallee_helper hwf hheap hframe hval hlookCallee henv
-        obtain ⟨recvObj, hlookRecv, hprov⟩ := hheap.payloadReceiverValid _ _ _ _ hlookCallee
         exact ⟨_, _, _, hheap, henvMid, .expr harg,
-          .cons (.awaitArgument hlookRecv hprov hsubRet hwfMidTy) hrest⟩
+          .cons pending hrest⟩
   | returnCallNotInvokable hlookCallee =>
     cases hctrl with
     | val hval =>
       cases hcont with
       | cons hframe hrest =>
-        exact absurd (returnCallNotInvokable_helper hheap hframe hval hlookCallee) id
+        exact absurd (returnCallNotInvokable_helper hwf hheap hframe hval hlookCallee) id
   | returnAwaitArgument =>
     cases hctrl with
     | val hval =>
       cases hcont with
       | cons hframe hrest =>
-        obtain ⟨⟨bodyΓ, henvBody, hbodyType⟩, hsubRet, hwfMidTy, henvMid⟩ :=
-          returnAwaitArgument_helper hwf hframe hval henv
+        obtain ⟨⟨bodyΓ, henvBody, hbodyType⟩, hsubRet, henvMid⟩ :=
+          returnAwaitArgument_helper hwf hheap hframe hval henv
         exact ⟨bodyΓ, _, _, hheap, henvBody, .expr hbodyType,
-          .cons (.sub (.returnTo henvMid) hsubRet hwfMidTy) hrest⟩
+          .cons (.sub (.returnTo henvMid) hsubRet) hrest⟩
   | returnCondTrue =>
     cases hctrl with
     | val hval =>
@@ -850,21 +823,21 @@ theorem preservation
     cases hctrl
 
 private theorem preservation_steps
-    (hwf : WellFormedClassTable ct)
-    (hsafe : StateSafe ct s.heap s.env s.control s.continuation expectedType)
+    (hwf : WellTypedClassHierarchy ct)
+    (hsafe : StateSafe hwf.toWellFormedClassHierarchy s.heap s.env s.control s.continuation expectedType)
     (hsteps : Steps ct s s') :
-    StateSafe ct s'.heap s'.env s'.control s'.continuation expectedType := by
+    StateSafe hwf.toWellFormedClassHierarchy s'.heap s'.env s'.control s'.continuation expectedType := by
   induction hsteps with
   | refl => exact hsafe
   | step hs _ ih => exact ih (preservation hwf hsafe hs)
 
 /-- Multi-step preservation. -/
 theorem preservation_multi
-    (hwf : WellFormedClassTable ct)
-    (hsafe : StateSafe ct heap env ctrl cont expectedType)
+    (hwf : WellTypedClassHierarchy ct)
+    (hsafe : StateSafe hwf.toWellFormedClassHierarchy heap env ctrl cont expectedType)
     (hsteps : Steps ct { heap, env, control := ctrl, continuation := cont }
                        { heap := heap', env := env', control := ctrl', continuation := cont' }) :
-    StateSafe ct heap' env' ctrl' cont' expectedType :=
+    StateSafe hwf.toWellFormedClassHierarchy heap' env' ctrl' cont' expectedType :=
   preservation_steps hwf hsafe hsteps
 
 end SmallStep

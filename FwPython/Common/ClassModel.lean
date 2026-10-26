@@ -36,10 +36,45 @@ def findByName (getName : α → Identifier) : List α → Identifier → Option
       else
         findByName getName xs name
 
+/-- Mapping entries preserves first-match lookup when the map preserves their names. -/
+theorem findByName_map_eq
+    (mapEntry : α → β)
+    (targetName : β → Identifier)
+    (sourceName : α → Identifier)
+    (preservesName : ∀ entry, targetName (mapEntry entry) = sourceName entry)
+    (entries : List α) (name : Identifier) :
+    findByName targetName (entries.map mapEntry) name =
+      (findByName sourceName entries name).map mapEntry := by
+  induction entries with
+  | nil => rfl
+  | cons first rest ih =>
+      by_cases sameName : sourceName first = name
+      · simp [findByName, sameName, preservesName]
+      · simpa [findByName, sameName, preservesName] using ih
+
 /-- Generic class lookup for class tables built from `ClassDecl`. -/
 def findClass {Method : Type} (ct : ClassTableDecl Method) (cname : Identifier) :
     Option (ClassDecl Method) :=
   findByName ClassDecl.name ct cname
+
+/-- Look in the added classes only if the original table contains no matching name. -/
+theorem findClass_append {Method : Type} (original added : ClassTableDecl Method)
+    (name : Identifier) :
+    findClass (original ++ added) name =
+      match findClass original name with
+      | some declaration => some declaration
+      | none => findClass added name := by
+  induction original with
+  | nil => rfl
+  | cons first rest ih =>
+    simp only [List.cons_append, findClass, findByName] at ih ⊢
+    split <;> simp_all
+
+/-- Appending classes preserves a successful lookup in the original table. -/
+theorem findClass_append_preserved {Method : Type} (original added : ClassTableDecl Method)
+    (name : Identifier) (entry : ClassDecl Method) (lookup : findClass original name = some entry) :
+    findClass (original ++ added) name = some entry := by
+  rw [findClass_append, lookup]
 
 /-- Generic method lookup for method lists built from `MethodDecl`. -/
 abbrev findMethodInList {Ty : Type} {Expr : Type}
@@ -51,32 +86,28 @@ theorem findByName_mem
     (h : findByName getName xs key = some x) :
     x ∈ xs := by
   induction xs with
-  | nil =>
-      simp [findByName] at h
-  | cons y ys ih =>
-      unfold findByName at h
-      split at h <;> simp_all
+  | nil => simp [findByName] at h
+  | cons y ys ih => simp [findByName] at h; split at h <;> simp_all
 
 theorem findByName_name
     (h : findByName getName xs key = some x) :
     getName x = key := by
   induction xs with
-  | nil =>
-      simp [findByName] at h
-  | cons y ys ih =>
-      unfold findByName at h
-      split at h <;> simp_all
+  | nil => simp [findByName] at h
+  | cons y ys ih => simp [findByName] at h; split at h <;> simp_all
+
+/-- A successful class lookup places the requested name in the table's name list. -/
+theorem findClass_name_known (lookup : findClass table name = some declaration) :
+    name ∈ table.map ClassDecl.name :=
+  List.mem_map.mpr ⟨declaration, findByName_mem lookup, findByName_name lookup⟩
 
 theorem findByName_eq_none_iff :
     findByName getName xs key = none ↔
       ∀ x, x ∈ xs → getName x ≠ key := by
   induction xs with
-  | nil =>
-      simp [findByName]
+  | nil => simp [findByName]
   | cons y ys ih =>
-      by_cases h : getName y = key
-      · simp [findByName, h]
-      · simp [findByName, h, ih]
+      by_cases h : getName y = key <;> simp [findByName, h, ih]
 
 theorem findClass_mem
     (h : findClass ct cname = some c) : c ∈ ct :=
@@ -84,14 +115,6 @@ theorem findClass_mem
 
 theorem findClass_name
     (h : findClass ct cname = some c) : c.name = cname :=
-  findByName_name h
-
-theorem findMethodInList_mem
-    (h : findMethodInList ms mname = some m) : m ∈ ms :=
-  findByName_mem h
-
-theorem findMethodInList_name
-    (h : findMethodInList ms mname = some m) : m.name = mname :=
   findByName_name h
 
 section Forall2Lookup
@@ -117,26 +140,123 @@ theorem findByName_none_of_forall₂
         simpa [findByName, hhead₂] using
           ih (by simpa [findByName, hhead] using h)
 
-/-- Successful lookup transports across any pointwise list relation that
-preserves member names. -/
-theorem findByName_some_of_forall₂
-    (hname : ∀ {a b}, R a b → getName₁ a = getName₂ b)
-    (hrel : Forall₂ R xs ys)
-    (h : findByName getName₁ xs key = some x) :
-    ∃ y, findByName getName₂ ys key = some y ∧ R x y := by
-  induction hrel generalizing key x with
-  | nil => simp [findByName] at h
-  | @cons a b as bs hr _ ih =>
-      by_cases hhead : getName₁ a = key
-      · simp [findByName, hhead] at h
-        subst h
-        exact ⟨b, by simp [findByName, (hname hr).symm.trans hhead], hr⟩
-      · have hhead₂ : getName₂ b ≠ key :=
-          fun hEq => hhead ((hname hr).trans hEq)
-        obtain ⟨y, hy, hxy⟩ := ih (by simpa [findByName, hhead] using h)
-        exact ⟨y, by simpa [findByName, hhead₂] using hy, hxy⟩
-
 end Forall2Lookup
+
+universe u v w
+
+section Forall2DataLookup
+
+variable {α : Type u} {β : Type v} {R : α → β → Type w}
+  {getName₁ : α → Identifier} {getName₂ : β → Identifier}
+
+/-- Constructive result for transporting a successful left-list lookup to a
+right-list lookup. The equality fields are proof-only facts, and the relation
+field carries the pointwise data. -/
+structure FindByNameForwardData
+    (R : α → β → Type w)
+    (getName₂ : β → Identifier)
+    (ys : List β)
+    (key : Identifier)
+    (x : α) where
+  /-- The related right-list element found by transported lookup. -/
+  value : β
+  /-- The right-list lookup equality for `value`. -/
+  found : findByName getName₂ ys key = some value
+  /-- The data-bearing relation between the original left element and `value`. -/
+  related : R x value
+
+/-- Constructive result for transporting a successful right-list lookup to a
+left-list lookup. The equality fields are proof-only facts, and the relation
+field carries the pointwise data. -/
+structure FindByNameReverseData
+    (R : α → β → Type w)
+    (getName₁ : α → Identifier)
+    (xs : List α)
+    (key : Identifier)
+    (y : β) where
+  /-- The related left-list element found by reverse transported lookup. -/
+  value : α
+  /-- The left-list lookup equality for `value`. -/
+  found : findByName getName₁ xs key = some value
+  /-- The data-bearing relation between `value` and the original right element. -/
+  related : R value y
+
+/-- Transport a failed lookup through aligned Type-valued list data by projecting
+to the existing Prop lookup theorem. -/
+theorem findByName_none_of_forall2Data
+    {xs : List α} {ys : List β} {key : Identifier}
+    (hname : ∀ {a b}, R a b → getName₁ a = getName₂ b)
+    (hrel : Forall2Data R xs ys)
+    (h : findByName getName₁ xs key = none) :
+    findByName getName₂ ys key = none :=
+  findByName_none_of_forall₂
+    (R := fun a b => Nonempty (R a b))
+    (getName₁ := getName₁)
+    (getName₂ := getName₂)
+    (fun hdata => hdata.elim hname)
+    (forall2Data_to_forall2 hrel (fun _ _ hr => ⟨hr⟩))
+    h
+
+/-- Transport a successful left-list lookup to a right-list lookup while
+preserving the pointwise data artifact. -/
+def findByName_some_of_forall2Data
+    {xs : List α} {ys : List β} {key : Identifier} {x : α}
+    (hname : ∀ {a b}, R a b → getName₁ a = getName₂ b)
+    (hrel : Forall2Data R xs ys)
+    (h : findByName getName₁ xs key = some x) :
+    FindByNameForwardData R getName₂ ys key x :=
+  match hrel with
+  | .nil => by
+      simp [findByName] at h
+  | @Forall2Data.cons _ _ _ a b as bs hr hrelTail =>
+      if hhead : getName₁ a = key then
+        have hx : a = x := by
+          simpa [findByName, hhead] using h
+        have hhead₂ : getName₂ b = key :=
+          (hname hr).symm.trans hhead
+        { value := b
+          found := by simp [findByName, hhead₂]
+          related := by simpa [hx] using hr }
+      else
+        have hhead₂ : getName₂ b ≠ key :=
+          fun hEq => hhead ((hname hr).trans hEq)
+        have htailLookup : findByName getName₁ as key = some x := by
+          simpa [findByName, hhead] using h
+        let tail :
+            FindByNameForwardData R getName₂ bs key x :=
+          findByName_some_of_forall2Data
+            (xs := as)
+            (ys := bs)
+            hname
+            hrelTail
+            htailLookup
+        { value := tail.value
+          found := by simpa [findByName, hhead₂] using tail.found
+          related := tail.related }
+
+/-- Transport a successful right-list lookup back to a left-list lookup while
+preserving the pointwise data artifact. Derived from
+`findByName_some_of_forall2Data` by swapping sides of the pointwise relation
+through `Forall2Data.symm`. -/
+def findByName_some_right_of_forall2Data
+    {xs : List α} {ys : List β} {key : Identifier} {y : β}
+    (hname : ∀ {a b}, R a b → getName₁ a = getName₂ b)
+    (hrel : Forall2Data R xs ys)
+    (h : findByName getName₂ ys key = some y) :
+    FindByNameReverseData R getName₁ xs key y :=
+  let forward :=
+    findByName_some_of_forall2Data
+      (R := fun b a => R a b)
+      (getName₁ := getName₂)
+      (getName₂ := getName₁)
+      (fun hr => (hname hr).symm)
+      hrel.symm
+      h
+  { value := forward.value
+    found := forward.found
+    related := forward.related }
+
+end Forall2DataLookup
 
 /-- Generic member lookup by following a list of class names in order. -/
 def findMemberInHierarchy
@@ -237,7 +357,7 @@ variable {CT₁ CT₂ C₁ C₂ M₁ M₂ : Type}
   {getMembers₁ : C₁ → List M₁} {getMembers₂ : C₂ → List M₂}
   {getName₁ : M₁ → Identifier} {getName₂ : M₂ → Identifier}
   {ct₁ : CT₁} {ct₂ : CT₂}
-  {hierarchy : List Identifier} {memberName : Identifier}
+  {memberName : Identifier}
   {RClass : C₁ → C₂ → Prop}
 
 /-- Transport successful hierarchy lookup across any relation that preserves
@@ -314,6 +434,148 @@ theorem findMemberInHierarchy_none_transport
               simpa [findMemberInHierarchy, hfc₂, memberNone hc hfm] using hrest
 
 end Transport
+
+section TransportData
+
+variable {CT₁ CT₂ C₁ C₂ M₁ M₂ : Type}
+  {findClass₁ : CT₁ → Identifier → Option C₁}
+  {findClass₂ : CT₂ → Identifier → Option C₂}
+  {getMembers₁ : C₁ → List M₁} {getMembers₂ : C₂ → List M₂}
+  {getName₁ : M₁ → Identifier} {getName₂ : M₂ → Identifier}
+  {ct₁ : CT₁} {ct₂ : CT₂}
+  {hierarchy : List Identifier} {memberName : Identifier}
+
+/-- Constructive result for transporting a class lookup into the target table. -/
+structure RelatedClassLookupData
+    (findClass₂ : CT₂ → Identifier → Option C₂)
+    (ct₂ : CT₂)
+    (cname : Identifier)
+    (RClass : C₁ → C₂ → Type u)
+    (c₁ : C₁) where
+  /-- The class found in the target table. -/
+  class2 : C₂
+  /-- The target-table lookup equality for `class2`. -/
+  found : findClass₂ ct₂ cname = some class2
+  /-- The data-bearing relation between the source and target classes. -/
+  related : RClass c₁ class2
+
+/-- Constructive result for transporting a member lookup into the target class. -/
+structure RelatedMemberLookupData
+    (getMembers₂ : C₂ → List M₂)
+    (getName₂ : M₂ → Identifier)
+    (memberName : Identifier)
+    (RMember : M₁ → M₂ → Type v)
+    (c₂ : C₂)
+    (m₁ : M₁) where
+  /-- The member found in the target class member list. -/
+  member2 : M₂
+  /-- The target member-list lookup equality for `member2`. -/
+  found : findByName getName₂ (getMembers₂ c₂) memberName = some member2
+  /-- The data-bearing relation between the source and target members. -/
+  related : RMember m₁ member2
+
+/-- Constructive result for transporting a hierarchy member lookup into the
+target hierarchy. -/
+structure RelatedHierarchyLookupData
+    (findClass₂ : CT₂ → Identifier → Option C₂)
+    (getMembers₂ : C₂ → List M₂)
+    (getName₂ : M₂ → Identifier)
+    (ct₂ : CT₂)
+    (hierarchy : List Identifier)
+    (memberName : Identifier)
+    (RMember : Identifier → M₁ → M₂ → Type v)
+    (m₁ : M₁) where
+  /-- The hierarchy entry whose member list produced `member2`. -/
+  definingClassName : Identifier
+  /-- The member found by transported target hierarchy lookup. -/
+  member2 : M₂
+  /-- The target hierarchy lookup equality for `member2`. -/
+  found :
+    findMemberInHierarchy findClass₂ getMembers₂ getName₂
+      ct₂ hierarchy memberName = some member2
+  /-- The data-bearing relation for the source member, target member, and
+      defining class name. -/
+  related : RMember definingClassName m₁ member2
+
+/-- Transport a successful hierarchy member lookup through data-bearing class
+and member lookup transports, preserving the defining class name for the
+returned member artifact. -/
+def findMemberInHierarchy_transportData
+    {RClass : C₁ → C₂ → Type u}
+    {RMember : Identifier → M₁ → M₂ → Type v}
+    {m₁ : M₁}
+    (hierarchy : List Identifier)
+    (classNone :
+      ∀ {cname}, findClass₁ ct₁ cname = none → findClass₂ ct₂ cname = none)
+    (classSome :
+      ∀ {cname c₁}, findClass₁ ct₁ cname = some c₁ →
+        RelatedClassLookupData findClass₂ ct₂ cname RClass c₁)
+    (memberNone :
+      ∀ {c₁ c₂}, RClass c₁ c₂ →
+        findByName getName₁ (getMembers₁ c₁) memberName = none →
+        findByName getName₂ (getMembers₂ c₂) memberName = none)
+    (memberSome :
+      ∀ {cname c₁ c₂ x₁}, RClass c₁ c₂ →
+        findClass₁ ct₁ cname = some c₁ →
+        findByName getName₁ (getMembers₁ c₁) memberName = some x₁ →
+        RelatedMemberLookupData getMembers₂ getName₂ memberName (RMember cname) c₂ x₁)
+    (hfind :
+      findMemberInHierarchy findClass₁ getMembers₁ getName₁
+        ct₁ hierarchy memberName = some m₁) :
+    RelatedHierarchyLookupData
+      findClass₂ getMembers₂ getName₂ ct₂ hierarchy memberName RMember m₁ :=
+  match hierarchy with
+  | [] => by
+      simp [findMemberInHierarchy] at hfind
+  | cname :: rest =>
+      match hclass : findClass₁ ct₁ cname with
+      | none =>
+          let restData :
+              RelatedHierarchyLookupData
+                findClass₂ getMembers₂ getName₂ ct₂ rest memberName RMember m₁ :=
+            findMemberInHierarchy_transportData
+              rest
+              (classNone := classNone)
+              (classSome := classSome)
+              (memberNone := memberNone)
+              (memberSome := memberSome)
+              (hfind := by simpa [findMemberInHierarchy, hclass] using hfind)
+          { definingClassName := restData.definingClassName
+            member2 := restData.member2
+            found := by
+              simpa [findMemberInHierarchy, classNone hclass] using restData.found
+            related := restData.related }
+      | some c₁ =>
+          let classLookup := classSome hclass
+          match hmember : findByName getName₁ (getMembers₁ c₁) memberName with
+          | none =>
+              let restData :
+                  RelatedHierarchyLookupData
+                    findClass₂ getMembers₂ getName₂ ct₂ rest memberName RMember m₁ :=
+                findMemberInHierarchy_transportData
+                  rest
+                  (classNone := classNone)
+                  (classSome := classSome)
+                  (memberNone := memberNone)
+                  (memberSome := memberSome)
+                  (hfind := by simpa [findMemberInHierarchy, hclass, hmember] using hfind)
+              { definingClassName := restData.definingClassName
+                member2 := restData.member2
+                found := by
+                  simpa [findMemberInHierarchy, classLookup.found,
+                    memberNone classLookup.related hmember] using restData.found
+                related := restData.related }
+          | some x₁ =>
+              let memberLookup := memberSome classLookup.related hclass hmember
+              have hx : x₁ = m₁ := by
+                simpa [findMemberInHierarchy, hclass, hmember] using hfind
+              { definingClassName := cname
+                member2 := memberLookup.member2
+                found := by
+                  simp [findMemberInHierarchy, classLookup.found, memberLookup.found]
+                related := by simpa [hx] using memberLookup.related }
+
+end TransportData
 
 /-- Constructive lookup witness for a class name together with its MRO. -/
 structure ClassLookupWitnessOf

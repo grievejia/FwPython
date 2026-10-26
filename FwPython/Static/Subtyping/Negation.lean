@@ -3,81 +3,74 @@ import FwPython.Static.Subtyping.Lattice
 
 /-! ## Class-only negative helper theorems -/
 
-/-- A class outside a designated leaf built-in's MRO satisfies the
-    corresponding `negClass` atom. -/
-theorem leafBuiltinNegClass
-    (hleaf : LeafBuiltin ct B)
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
+
+/-- A known class outside a sealed builtin's MRO satisfies the builtin's exclusion. -/
+theorem classNegSealedClass
+    (hsealed : B ∈ sealedClasses)
     (hfindB : findClass ct B = some bcls)
     (hmroB : ComputeMro ct bcls bmro)
-    (hnotmem : C ∉ bmro) :
-    IsSubtype ct (.class_ C) (.negClass B) :=
-  -- `class C <: class C ∩ (class B | negClass B)` then distribute and project.
-  have hBNegC : IsSubtype ct (.class_ B) (.negClass C) :=
-    .sealedClassNegClass hleaf hfindB hmroB hnotmem
-  have hCBBottom : IsSubtype ct (.intersection (.class_ C) (.class_ B)) .bottom :=
-    .trans (.interIntro (.interLeft .refl) (.interRight hBNegC)) .classSelfNegClassBottom
-  .trans
-    (.trans (.interIntro .refl (.trans .objectTop .objectClassUnionNegClass))
-      (.trans subtype_inter_union_distrib
-        (.unionElim (.trans hCBBottom .bottom) (.interRight .refl))))
-    .refl
+    (hnotmem : C ∉ bmro) (validC : WellFormedTy ct (.class_ C)) :
+    IsSubtype structural (.class_ C) (.negClass B) := by
+  have validB : WellFormedTy ct (.class_ B) := WellFormedTy.class_of_lookup hfindB
+  have validNegB := validB.neg_of_class
+  have excluded : IsSubtype structural (.class_ B) (.negClass C) :=
+    .sealedClassNegClass hsealed hfindB hmroB hnotmem validC
+  have empty : IsSubtype structural (.intersection (.class_ C) (.class_ B)) .bottom :=
+    .trans (.interIntro (.interLeft (.refl validC) validB) (.interRight excluded validC))
+      (.classSelfNegClassBottom validC)
+  exact .trans
+    (.interIntro (.refl validC) (.trans (.objectTop validC) (.objectClassUnionNegClass validB)))
+    (.trans (subtype_inter_union_distrib validC validB validNegB)
+      (.unionElim (.trans empty (.bottom validNegB))
+        (.interRight (.refl validNegB) validC)))
 
-/-- If `class_ D <: class_ C`, then `class_ D & negClass C <: bottom`. -/
+/-- A subclass type and its superclass exclusion have no common value. -/
 theorem classNegClassBottom
-    (hsub : IsSubtype ct (.class_ D) (.class_ C)) :
-    IsSubtype ct (.intersection (.class_ D) (.negClass C)) .bottom :=
+    (hsub : IsSubtype structural (.class_ D) (.class_ C)) :
+    IsSubtype structural (.intersection (.class_ D) (.negClass C)) .bottom :=
   .trans
-    (.interIntro (.interLeft hsub) (.interRight .refl))
-    .classSelfNegClassBottom
+    (.interIntro (.interLeft hsub hsub.targetWellFormed.neg_of_class)
+      (.interRight (.refl hsub.targetWellFormed.neg_of_class) hsub.sourceWellFormed))
+    (.classSelfNegClassBottom hsub.targetWellFormed)
 
-/-- Class-only antitonicity: if `class_ D <: class_ C`, then
-    `negClass C <: negClass D`. -/
+/-- Excluding a superclass also excludes each subclass. -/
 theorem negClassAntitone
-    (hsub : IsSubtype ct (.class_ D) (.class_ C)) :
-    IsSubtype ct (.negClass C) (.negClass D) :=
-  -- `negClass C <: negClass C ∩ Object <: negClass C ∩ (class D | negClass D)`
-  -- then distribute, kill the `class D` arm via `classNegClassBottom`, project.
-  have hLeftBottom : IsSubtype ct (.intersection (.negClass C) (.class_ D)) .bottom :=
-    .trans subtype_inter_comm (classNegClassBottom hsub)
-  .trans subtype_inter_object'
-    (.trans (.interIntro (.interLeft .refl) (.interRight .objectClassUnionNegClass))
-      (.trans subtype_inter_union_distrib
-        (.unionElim (.trans hLeftBottom .bottom) (.interRight .refl))))
+    (hsub : IsSubtype structural (.class_ D) (.class_ C)) :
+    IsSubtype structural (.negClass C) (.negClass D) := by
+  have validC := hsub.targetWellFormed
+  have validD := hsub.sourceWellFormed
+  have negC := validC.neg_of_class
+  have negD := validD.neg_of_class
+  have empty : IsSubtype structural (.intersection (.negClass C) (.class_ D)) .bottom :=
+    .trans (subtype_inter_comm negC validD) (classNegClassBottom hsub)
+  exact .trans
+    (.interIntro (.refl negC) (.trans (.objectTop negC) (.objectClassUnionNegClass validD)))
+    (.trans (subtype_inter_union_distrib negC validD negD)
+      (.unionElim (.trans empty (.bottom negD)) (.interRight (.refl negD) negC)))
 
-/-- Mirror `classNegClassBottom` across intersection commutativity. -/
-theorem negClass_class_contradiction
-    (hsub : IsSubtype ct (.class_ D) (.class_ C)) :
-    IsSubtype ct (.intersection (.negClass C) (.class_ D)) .bottom :=
-  .trans subtype_inter_comm (classNegClassBottom hsub)
-
-/-- Every class contradicts its own `negClass` atom. -/
-theorem class_self_negClass_contradiction :
-    IsSubtype ct (.intersection (.class_ C) (.negClass C)) .bottom :=
-  classNegClassBottom .refl
-
-/-- No callable can satisfy `negClass BoundMethod`. -/
+/-- No valid function type can also exclude BoundMethod. -/
 theorem callable_negClass_boundMethod_contradiction
-    (hBMFind : findClass ct boundMethodClass = some bmCls)
-    (hBMMro : ComputeMro ct bmCls bmMro) :
-    IsSubtype ct
-      (.intersection (.callable P R) (.negClass boundMethodClass))
-      .bottom :=
+    (inputValid : WellFormedTy ct P) (resultValid : WellFormedTy ct R) :
+    IsSubtype structural
+      (.intersection (.callable P R) (.negClass boundMethodClass)) .bottom :=
   .trans
     (.interIntro
-      (.interLeft (.callableBoundMethod hBMFind hBMMro))
-      (.interRight .refl))
-    (classNegClassBottom .refl)
+      (.interLeft (.callableBoundMethod inputValid resultValid) (WellFormedTy.boundMethod structural).neg_of_class)
+      (.interRight (.refl (WellFormedTy.boundMethod structural).neg_of_class) (.callable inputValid resultValid)))
+    (classNegClassBottom (.refl (.boundMethod structural)))
 
-/-- A leaf built-in class exclusion is enough to show a class is not callable. -/
-theorem leaf_class_callable_bottom
-    (hleaf : LeafBuiltin ct boundMethodClass)
+/-- A known class outside BoundMethod's MRO has no callable values. -/
+theorem class_callable_bottom_of_not_boundMethod
     (hBMFind : findClass ct boundMethodClass = some bmCls)
     (hBMMro : ComputeMro ct bmCls bmro)
-    (hnotmem : C ∉ bmro) :
-    IsSubtype ct (.intersection (.class_ C) (.callable P R)) .bottom :=
-  .trans subtype_inter_comm
+    (hnotmem : C ∉ bmro) (classValid : WellFormedTy ct (.class_ C))
+    (inputValid : WellFormedTy ct P) (resultValid : WellFormedTy ct R) :
+    IsSubtype structural (.intersection (.class_ C) (.callable P R)) .bottom :=
+  .trans (subtype_inter_comm classValid (.callable inputValid resultValid))
     (.trans
       (.interIntro
-        (.interLeft (.callableBoundMethod hBMFind hBMMro))
-        (.interRight (leafBuiltinNegClass hleaf hBMFind hBMMro hnotmem)))
-      (classNegClassBottom .refl))
+        (.interLeft (.callableBoundMethod inputValid resultValid) classValid)
+        (.interRight (classNegSealedClass (by simp [sealedClasses]) hBMFind hBMMro hnotmem classValid)
+          (.callable inputValid resultValid)))
+      (classNegClassBottom (.refl (.boundMethod structural))))

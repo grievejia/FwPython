@@ -51,19 +51,13 @@ structure WellFormedGClassTable (ct : GClassTable) where
   /-- Direct parent lists are duplicate-free. -/
   baseClassesDistinct : ∀ cname c,
     findGClass ct cname = some c → c.baseClasses.Nodup
-  /-- Bool is a leaf class (no class extends it). -/
-  boolLeaf : ∀ cname c mro, findGClass ct cname = some c →
-    GComputeMro ct c mro → boolClass ∈ mro → cname = boolClass
-  /-- NoneType is a leaf class. -/
-  noneLeaf : ∀ cname c mro, findGClass ct cname = some c →
-    GComputeMro ct c mro → noneClass ∈ mro → cname = noneClass
-  /-- BoundMethod is a leaf class. -/
-  boundMethodLeaf : ∀ cname c mro, findGClass ct cname = some c →
-    GComputeMro ct c mro → boundMethodClass ∈ mro → cname = boundMethodClass
+  /-- A selected class whose MRO contains a sealed builtin is that builtin itself. -/
+  sealedLeaf : ∀ builtin, builtin ∈ sealedClasses → ∀ cname c mro, findGClass ct cname = some c →
+    GComputeMro ct c mro → builtin ∈ mro → cname = builtin
 
 instance wellFormedGClassTable_subsingleton :
     Subsingleton (WellFormedGClassTable ct) :=
-  ⟨fun ⟨_, _, _, _, _, _, _, _, _, _⟩ ⟨_, _, _, _, _, _, _, _, _, _⟩ => by
+  ⟨fun ⟨_, _, _, _, _, _, _, _⟩ ⟨_, _, _, _, _, _, _, _⟩ => by
     congr 1 <;>
       first
       | exact Subsingleton.elim _ _

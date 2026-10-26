@@ -9,13 +9,15 @@ A safe non-final checked state can always take a step. Together with
 preservation, this means well-typed checked programs never get stuck:
 they either terminate normally, signal blame, or keep stepping. -/
 
+variable {gct : GClassTable} {structural : WellFormedClassHierarchy (eraseClassTable gct)}
+
 namespace Checked
 
 /-! ### Helpers for progress -/
 
 /-- A well-typed `isInstance` implies the variable is bound in the type env. -/
 private theorem isInstance_extract_var_type
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .isInstance x C) :
     ∃ T, Γ.lookup x = some T := by
   induction hty with
@@ -24,7 +26,7 @@ private theorem isInstance_extract_var_type
 
 /-- A well-typed `cond (isInstance x C)` implies the variable is bound in the type env. -/
 private theorem condIsInstance_extract_var_type
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .cond (.isInstance x C) thenBr elseBr) :
     ∃ T, Γ.lookup x = some T := by
   induction hty with
@@ -154,20 +156,14 @@ theorem checked_progress
           cases hmeth : findCheckedMethodInMro cct mro attrName with
           | none => exact ⟨_, _, _, _, .returnDynAttrAccessNotFound hlookH hfindC hmro hmeth⟩
           | some cm => exact ⟨_, _, _, _, .returnDynAttrAccess hlookH hfindC hmro hmeth rfl⟩
-      | callCallee arg paramTy returnTy returnLabels =>
+      | callCallee arg paramTy returnTy returnObligation =>
         cases hcont with | cons hf hk =>
         cases hf with | callCallee _ _ _ _ _ _ =>
         match checkedValueWitness_callable_view hvty with
         | .objRefBoundMethod hlook _ _ => exact ⟨_, _, _, _, .returnCallCalleeBound hlook⟩
-      | callValue argVal paramTy returnTy returnLabels =>
-        cases hcont with | cons hf hk =>
-        cases hf with | callValue _ _ _ _ _ =>
-        match checkedValueWitness_callable_view hvty with
-        | .objRefBoundMethod hlook _ _ => exact ⟨_, _, _, _, .returnCallValueBound hlook⟩
-      | awaitArgument recvOid m returnTy returnLabels =>
-        rcases enforceValue_total hheap hwfct m.parameterContract m.parameterLabels v
-            hvlook with
-          ⟨v', henf⟩ | henf
+      | awaitArgument recvOid m returnTy returnObligation =>
+        rcases enforceValue_total hheap (compileBoundaryTarget m.paramTy) v hvlook with
+          henf | henf
         · exact ⟨_, _, _, _, .returnAwaitArgumentOk henf⟩
         · exact ⟨_, _, _, _, .returnAwaitArgumentBlame henf⟩
       | cond thenBr elseBr =>
@@ -179,8 +175,8 @@ theorem checked_progress
           · subst hfalse; exact ⟨_, _, _, _, .returnCondFalse⟩
           exact ⟨_, _, _, _, .returnCondNotBool htrue hfalse⟩
       | enforce c ℓ =>
-        rcases enforceValue_total hheap hwfct (compileBoundaryTarget c) ℓ v hvlook with
-          ⟨v', henf⟩ | henf
+        rcases enforceValue_total hheap (compileBoundaryTarget c) v hvlook with
+          henf | henf
         · exact ⟨_, _, _, _, .returnEnforceOk henf⟩
         · exact ⟨_, _, _, _, .returnEnforceBlame henf⟩
   | blame =>
@@ -194,7 +190,6 @@ theorem checked_progress
       | attrAccess => exact ⟨_, _, _, _, .blameUnwindAttrAccess⟩
       | callCallee _ _ _ _ => exact ⟨_, _, _, _, .blameUnwindCallCallee⟩
       | awaitArgument _ _ _ _ => exact ⟨_, _, _, _, .blameUnwindAwaitArgument⟩
-      | callValue _ _ _ _ => exact ⟨_, _, _, _, .blameUnwindCallValue⟩
       | cond => exact ⟨_, _, _, _, .blameUnwindCond⟩
       | returnTo => exact ⟨_, _, _, _, .blameUnwindReturnTo⟩
       | enforce => exact ⟨_, _, _, _, .blameUnwindEnforce⟩

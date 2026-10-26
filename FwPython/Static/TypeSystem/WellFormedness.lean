@@ -1,7 +1,10 @@
+import FwPython.Static.Subtyping.Inversion
 import FwPython.Static.TypeSystem.Value.Lemmas
 import FwPython.Static.MRO.LookupLemmas
 
 /-! ## Type environment update helpers -/
+
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
 
 theorem tyEnv_update_lookup_eq
     {Γ : TyEnv} {x : Identifier} (S : Ty)
@@ -49,74 +52,37 @@ theorem wellFormedTyEnv_update
 theorem wellFormedTyEnv_update_class
     (hΓwf : WellFormedTyEnv ct Γ)
     (hlook : Γ.lookup x = some T)
-    (hfind : findClass ct C = some cls)
-    (hmro : ComputeMro ct cls mro) :
+    (hfind : findClass ct C = some cls) :
     WellFormedTyEnv ct (Γ.update x (.intersection T (.class_ C))) :=
   wellFormedTyEnv_update hΓwf hlook
-    (.intersection (hΓwf _ _ hlook) (.class_ hfind hmro))
+    (.intersection (hΓwf _ _ hlook) (WellFormedTy.class_of_lookup hfind))
 
 /-- Narrowing a bound variable's type by intersecting with a negated class
     preserves environment well-formedness. -/
 theorem wellFormedTyEnv_update_negClass
     (hΓwf : WellFormedTyEnv ct Γ)
     (hlook : Γ.lookup x = some T)
-    (hfind : findClass ct C = some cls)
-    (hmro : ComputeMro ct cls mro) :
+    (hfind : findClass ct C = some cls) :
     WellFormedTyEnv ct (Γ.update x (.intersection T (.negClass C))) :=
   wellFormedTyEnv_update hΓwf hlook
-    (.intersection (hΓwf _ _ hlook) (.negClass hfind hmro))
+    (.intersection (hΓwf _ _ hlook) (WellFormedTy.negClass_of_lookup hfind))
 
 /-! ## Well-formedness of typed terms -/
 
-/-- `FindMethodType` determines a unique method signature for a given
-    receiver class and method name. -/
-theorem findMethodType_unique
-    (h1 : FindMethodType ct cname attrName paramTy₁ returnTy₁)
-    (h2 : FindMethodType ct cname attrName paramTy₂ returnTy₂) :
-    paramTy₁ = paramTy₂ ∧ returnTy₁ = returnTy₂ := by
-  obtain ⟨_, _, _, hfind₁, hmro₁, hlookup₁, rfl, rfl⟩ := h1
-  obtain ⟨_, _, _, hfind₂, hmro₂, hlookup₂, rfl, rfl⟩ := h2
-  cases hfind₁.symm.trans hfind₂
-  cases determinism hmro₁ hmro₂
-  cases hlookup₁.symm.trans hlookup₂
-  exact ⟨rfl, rfl⟩
-
 /-- FindMethodType produces well-formed callable types. -/
 theorem findMethodType_wellFormed
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hfmt : FindMethodType ct cname attrName paramTy returnTy) :
-    WellFormedTy ct paramTy ∧ WellFormedTy ct returnTy := by
-  obtain ⟨c, mro, m, hfind, hmro, hmethod, hpeq, hreq⟩ := hfmt
-  obtain ⟨dname, d, _, hfindd, hmem⟩ := findMethodInMro_provenance hmethod
-  have ⟨hp, hr⟩ := hwf.allMethodSignaturesWellFormed dname d m hfindd hmem
-  exact ⟨hpeq ▸ hp, hreq ▸ hr⟩
-
-/-- Well-typed values have well-formed types. -/
-theorem valueHasType_wellFormed
-    (hwf : WellFormedClassTable ct)
-    (hheap : HeapWellFormed ct h)
-    (hval : ValueHasType ct h v T) : WellFormedTy ct T := by
-  induction hval with
-  | objRef hlook hsub =>
-    obtain ⟨c, mro, hfind, hmro⟩ := hheap.classesExist _ _ hlook
-    have ⟨acls, amro, hafind, hamro⟩ := mro_member_wellFormedClass
-      hwf.allMrosExist_exists (findClass_self hfind) hmro
-      (class_subtype_mem_mro hsub hfind hmro)
-    exact .class_ hafind hamro
-  | objRefCallable hlook hlookRecv hprov =>
-    obtain ⟨recvCls, recvMro, hfindRecv, hmroRecv, hmethodRecv⟩ := hprov
-    obtain ⟨dname, d, _, hfindd, hmem⟩ := findMethodInMro_provenance hmethodRecv
-    have ⟨hp, hr⟩ := hwf.allMethodSignaturesWellFormed dname d _ hfindd hmem
-    exact .callable hp hr
-  | sub _ _ hwfU _ => exact hwfU
-  | interIntro _ _ hwfI _ _ => exact hwfI
-  | objRefNegClass _ hwfNeg _ _ _ => exact hwfNeg
+    WellFormedTy ct (.callable paramTy returnTy) := by
+  obtain ⟨_, _, _, found, computed, hmethod, rfl, rfl⟩ := hfmt
+  exact methodInReceiverMro_wellFormed hwf
+    (method_in_receiver_mro_of_lookup found computed hmethod)
 
 /-- Derive WellFormedTyEnv from EnvHasType via valueHasType_wellFormed. -/
 theorem envHasType_wellFormedTyEnv
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct h)
-    (henv : EnvHasType ct h env Γ) :
+    (henv : EnvHasType hwf.toWellFormedClassHierarchy h env Γ) :
     WellFormedTyEnv ct Γ := by
   intro x T hlook
   obtain ⟨v, _, hval⟩ := henv x T hlook
@@ -126,12 +92,12 @@ theorem envHasType_wellFormedTyEnv
 
 /-- Narrow the type environment at variable `x` given a new typing proof. -/
 theorem env_has_type_narrow
-    {ct : ClassTable} {hp : Heap} {env : Env} {Γ : TyEnv}
+     {hp : Heap} {env : Env} {Γ : TyEnv}
     {x : Identifier} {T S : Ty}
-    (henv : EnvHasType ct hp env Γ)
+    (henv : EnvHasType structural hp env Γ)
     (hlookΓ : Γ.lookup x = some T)
-    (hval : ∀ v, env.lookup x = some v → ValueHasType ct hp v S) :
-    EnvHasType ct hp env (Γ.update x S) := by
+    (hval : ∀ v, env.lookup x = some v → ValueHasType structural hp v S) :
+    EnvHasType structural hp env (Γ.update x S) := by
   intro y Ty' hlookΓ'
   by_cases hyx : y = x
   · subst hyx
@@ -146,44 +112,45 @@ theorem env_has_type_narrow
 
 /-- A typed method must exist on the runtime receiver's MRO. -/
 theorem typed_method_exists_on_runtime_receiver
-    {ct : ClassTable} {cname attrName : Identifier} {paramTy returnTy : Ty}
+     {cname attrName : Identifier} {paramTy returnTy : Ty}
+    (hwf : WellTypedClassHierarchy ct)
     (hfmt : FindMethodType ct cname attrName paramTy returnTy)
     {recvClass : Identifier} {recvCls : Class} {recvMro : List Identifier}
-    (hsub : IsSubtype ct (.class_ recvClass) (.class_ cname))
+    (hsub : IsSubtype hwf.toWellFormedClassHierarchy (.class_ recvClass) (.class_ cname))
     (hfindRecv : findClass ct recvClass = some recvCls)
     (hmroRecv : ComputeMro ct recvCls recvMro) :
     ∃ m, findMethodInMro ct recvMro attrName = some m := by
   obtain ⟨c_decl, mro_decl, m_decl, hfind_decl, hmro_decl, hmethod_decl, _, _⟩ := hfmt
-  have hcn_in_mro := class_subtype_mem_mro hsub hfindRecv hmroRecv
+  have hcn_in_mro := class_subtype_mem_mro hwf.toWellFormedClassHierarchy hsub hfindRecv hmroRecv
   have hfind_cname : findClass ct cname = some c_decl := hfind_decl
   exact findMethodInMro_of_ancestor hmroRecv (findClass_self hfindRecv) hcn_in_mro
     hfind_cname hmro_decl hmethod_decl
 
 /-- Liskov variance for a typed method resolved on the runtime receiver. -/
 theorem typed_method_variance_on_runtime_receiver
-    {ct : ClassTable}
-    (hliskov : LiskovCondition ct)
+
+    (hwf : WellTypedClassHierarchy ct)
     {cname attrName : Identifier} {paramTy returnTy : Ty}
     (hfmt : FindMethodType ct cname attrName paramTy returnTy)
     {recvClass : Identifier} {recvCls : Class} {recvMro : List Identifier}
-    (hsub : IsSubtype ct (.class_ recvClass) (.class_ cname))
+    (hsub : IsSubtype hwf.toWellFormedClassHierarchy (.class_ recvClass) (.class_ cname))
     (hfindRecv : findClass ct recvClass = some recvCls)
     (hmroRecv : ComputeMro ct recvCls recvMro)
     {m : Method}
     (hlookupRecv : findMethodInMro ct recvMro attrName = some m) :
-    IsSubtype ct paramTy m.paramTy ∧ IsSubtype ct m.returnTy returnTy := by
+    IsSubtype hwf.toWellFormedClassHierarchy paramTy m.paramTy ∧ IsSubtype hwf.toWellFormedClassHierarchy m.returnTy returnTy := by
   obtain ⟨c_decl, mro_decl, m_decl, hfind_decl, hmro_decl, hmethod_decl, hpeq, hreq⟩ := hfmt
-  have hcn_in_mro := class_subtype_mem_mro hsub hfindRecv hmroRecv
-  have ⟨hpvar, hrvar⟩ := hliskov recvClass cname recvCls c_decl recvMro mro_decl attrName m m_decl
+  have hcn_in_mro := class_subtype_mem_mro hwf.toWellFormedClassHierarchy hsub hfindRecv hmroRecv
+  have ⟨hpvar, hrvar⟩ := hwf.liskovCondition recvClass cname recvCls c_decl recvMro mro_decl attrName m m_decl
     hfindRecv hmroRecv hcn_in_mro hfind_decl hmro_decl hlookupRecv hmethod_decl
   exact ⟨hpeq ▸ hpvar, hreq ▸ hrvar⟩
 
 /-- A subtype of a leaf built-in is the built-in itself. -/
 theorem bool_subtype_is_bool
-    (hwf : WellFormedClassTable ct)
-    (hsub : IsSubtype ct (.class_ actual) (.class_ boolClass))
+    (hwf : WellTypedClassHierarchy ct)
+    (hsub : IsSubtype hwf.toWellFormedClassHierarchy (.class_ actual) (.class_ boolClass))
     (hfind : findClass ct actual = some cls)
     (hmro : ComputeMro ct cls mro) :
     actual = boolClass :=
-  hwf.builtinsLeaf actual cls mro hfind hmro
-    (class_subtype_mem_mro hsub hfind hmro)
+  hwf.sealedLeaf boolClass (by simp [sealedClasses]) actual cls mro hfind hmro
+    (class_subtype_mem_mro hwf.toWellFormedClassHierarchy hsub hfind hmro)

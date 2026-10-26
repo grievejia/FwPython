@@ -2,594 +2,463 @@ import FwPython.Static.TypeSystem.Algorithmic.Attr
 import FwPython.Static.TypeSystem.Algorithmic.Call
 import FwPython.Static.TypeSystem.Algorithmic.Basis
 
-/-! ## Algorithmic basis inference -/
+/-! ## Expression type inference
 
-private def mkInferredBasisOfSound
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (raw : List Ty)
-    (hrawSound : ∀ T, T ∈ raw → HasType ct Γ e T) :
-    InferredBasis ct Γ e where
-  raw := raw
-  elems := saturateBasis raw
-  saturated := rfl
-  wf := by
-    intro T hT
-    exact saturateBasis_member_wellFormed
-      (ct := ct) (B := raw)
-      (fun U hU => hasType_wellFormed hwfct hΓwf (hrawSound U hU))
-      hT
-  sound := by
-    intro T hT
-    exact saturateBasis_member_sound
-      (ct := ct) (Γ := Γ) (e := e) (B := raw) hrawSound hT
+Inference computes a finite set of candidates that is sufficient for every
+declarative result type. It constructs valid packages and closes them under
+nonempty intersection to cover combined typings. The checker accepts a
+requested type when one candidate is below it, using the validity proofs
+carried by both packages for the comparison.
+-/
 
-@[simp] theorem mkInferredBasisOfSound_raw
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (raw : List Ty)
-    (hrawSound : ∀ T, T ∈ raw → HasType ct Γ e T) :
-    (mkInferredBasisOfSound
-      (ct := ct) (Γ := Γ) (e := e) hwfct hΓwf raw hrawSound).raw = raw := rfl
+open FwPython.Static.Subtyping
 
-@[simp] theorem mkInferredBasisOfSound_elems
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (raw : List Ty)
-    (hrawSound : ∀ T, T ∈ raw → HasType ct Γ e T) :
-    (mkInferredBasisOfSound
-      (ct := ct) (Γ := Γ) (e := e) hwfct hΓwf raw hrawSound).elems = saturateBasis raw := rfl
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
 
-def pairwiseUnions (left right : List Ty) : List Ty :=
-  left.flatMap fun T1 =>
-    right.map fun T2 =>
-      .union T1 T2
+/-! ### Searching for a `Bool` witness in a basis
 
-theorem mem_pairwiseUnions :
-    U ∈ pairwiseUnions left right ↔
-      ∃ T1, T1 ∈ left ∧ ∃ T2, T2 ∈ right ∧ U = .union T1 T2 := by
-  constructor
-  · intro hU
-    rw [pairwiseUnions] at hU
-    rw [List.mem_flatMap] at hU
-    rcases hU with ⟨T1, hT1, hmap⟩
-    rw [List.mem_map] at hmap
-    rcases hmap with ⟨T2, hT2, hEq⟩
-    exact ⟨T1, hT1, T2, hT2, hEq.symm⟩
-  · rintro ⟨T1, hT1, T2, hT2, rfl⟩
-    rw [pairwiseUnions]
-    rw [List.mem_flatMap]
-    refine ⟨T1, hT1, ?_⟩
-    rw [List.mem_map]
-    exact ⟨T2, hT2, rfl⟩
+The cond cases require that the condition's basis contain at least one type
+subtype of `Bool`. `findBoolWitness` decides this and produces a witness. -/
 
-def findBoolWitness
-    (hwfct : WellFormedClassTable ct)
-    (basis : List Ty)
-    (hbasisWf : ∀ T, T ∈ basis → WellFormedTy ct T) :
-    Option { S // S ∈ basis ∧ IsSubtype ct S (.class_ boolClass) } :=
+/-- Find a valid candidate that is a subtype of Bool. -/
+def findBoolWitness (structural : WellFormedClassHierarchy ct)
+    (basis : List (WellFormedType (ct.map ClassDecl.name))) :
+    Option { S // S ∈ basis ∧ IsSubtype structural S.raw (.class_ boolClass) } :=
   match basis with
-  | [] =>
-      none
+  | [] => none
   | S :: rest =>
-      let hwfBool := wellFormed_bool_type hwfct
-      let _ : Decidable (IsSubtype ct S (.class_ boolClass)) :=
-        isSubtype_decidable (ct := ct) (T := S) (U := .class_ boolClass)
-          hwfct (hbasisWf S (by simp)) hwfBool
-      if hsub : IsSubtype ct S (.class_ boolClass) then
-        some ⟨S, by exact ⟨by simp, hsub⟩⟩
+      letI : Decidable (IsSubtype structural S.raw (.class_ boolClass)) :=
+        WellFormedType.subtypeDecidable structural S (WellFormedTy.bool structural).toType
+      if accepted : IsSubtype structural S.raw (.class_ boolClass) then
+        some ⟨S, List.mem_cons_self .., accepted⟩
       else
-        match findBoolWitness hwfct rest (fun T hT => hbasisWf T (by simp [hT])) with
-        | none =>
-            none
-        | some ⟨T, hT, hsubT⟩ =>
-            some ⟨T, by exact ⟨by simp [hT], hsubT⟩⟩
-termination_by basis.length
+        match findBoolWitness structural rest with
+        | none => none
+        | some ⟨T, member, included⟩ => some ⟨T, .tail _ member, included⟩
 
-def ordinaryCondRaw
-    (hwfct : WellFormedClassTable ct)
-    (condBasis : InferredBasis ct Γ condExpr)
-    (thenBasis : InferredBasis ct Γ thenBr)
-    (elseBasis : InferredBasis ct Γ elseBr) : List Ty :=
-  match findBoolWitness hwfct condBasis.elems condBasis.wf with
-  | some _ => pairwiseUnions thenBasis.elems elseBasis.elems
+/-- A Bool-compatible candidate makes the witness search succeed. -/
+theorem findBoolWitness_some_of_match (structural : WellFormedClassHierarchy ct)
+    (hcond : S ∈ basis) (hbool : IsSubtype structural S.raw (.class_ boolClass)) :
+    ∃ witness, findBoolWitness structural basis = some witness := by
+  induction basis with
+  | nil => cases hcond
+  | cons T rest ih =>
+      letI : Decidable (IsSubtype structural T.raw (.class_ boolClass)) :=
+        WellFormedType.subtypeDecidable structural T (WellFormedTy.bool structural).toType
+      by_cases included : IsSubtype structural T.raw (.class_ boolClass)
+      · exact ⟨⟨T, .head _, included⟩, by simp [findBoolWitness, included]⟩
+      · rcases List.mem_cons.mp hcond with rfl | member
+        · exact (included hbool).elim
+        · obtain ⟨⟨U, listed, compatible⟩, found⟩ := ih member
+          exact ⟨⟨U, .tail _ listed, compatible⟩, by simp [findBoolWitness, included, found]⟩
+
+/-! ### Per-construct candidate packages
+
+Each expression constructor computes valid candidates.
+Soundness is stated on these packages; their raw fields supply the annotations
+used by declarative typing. -/
+
+/-- A visible binding supplies its annotation and validity proof together. -/
+private def varTypes (Γ : TyEnv) (valid : WellFormedTyEnv ct Γ) (x : Identifier) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  ((Γ.lookup x).attach.map fun entry => (valid x entry.1 entry.2).toType).toList
+
+/-- A variable has the annotation of every candidate from its visible binding. -/
+private theorem varTypes_sound (valid : WellFormedTyEnv ct Γ)
+    (member : type ∈ varTypes Γ valid x) : HasType structural Γ (.var x) type.raw := by
+  cases looked : Γ.lookup x with
+  | none => simp [varTypes, looked] at member
+  | some annotation =>
+      simp [varTypes, Option.attach_eq_some _ ⟨annotation, looked⟩] at member
+      cases member
+      exact .var looked
+
+/-- Return a declared class type unless it is one of the three non-instantiable builtins. -/
+private def newTypes (ct : ClassTable) (cname : Identifier) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  match (findClass ct cname).attach with
+  | none => []
+  | some ⟨_, found⟩ =>
+      if cname = boolClass ∨ cname = noneClass ∨ cname = boundMethodClass then []
+      else [(WellFormedTy.class_of_lookup found).toType]
+
+/-- Each constructor candidate names a declared, instantiable class. -/
+private theorem newTypes_sound (member : type ∈ newTypes ct cname) :
+    HasType structural Γ (.new cname) type.raw := by
+  cases found : findClass ct cname with
+  | none => simp [newTypes, Option.attach_eq_none_iff.mpr found] at member
+  | some declaration =>
+      by_cases excluded : cname = boolClass ∨ cname = noneClass ∨ cname = boundMethodClass
+      · simp [newTypes, Option.attach_eq_some _ ⟨declaration, found⟩, excluded] at member
+      · simp [newTypes, Option.attach_eq_some _ ⟨declaration, found⟩, excluded] at member
+        cases member
+        exact .new found (fun h => excluded (.inl h))
+          (fun h => excluded (.inr (.inl h))) (fun h => excluded (.inr (.inr h)))
+
+/-- The valid Bool result of a class test with an existing variable and class. -/
+private def isInstanceTypes (structural : WellFormedClassHierarchy ct)
+    (Γ : TyEnv) (x C : Identifier) : List (WellFormedType (ct.map ClassDecl.name)) :=
+  match Γ.lookup x, findClass ct C with
+  | some _, some _ => [(WellFormedTy.bool structural).toType]
+  | _, _ => []
+
+/-- Each class-test candidate has the Bool result required by the typing rule. -/
+private theorem isInstanceTypes_sound
+    (member : type ∈ isInstanceTypes structural Γ x C) :
+    HasType structural Γ (.isInstance x C) type.raw := by
+  cases looked : Γ.lookup x with
+  | none => simp [isInstanceTypes, looked] at member
+  | some _ =>
+      cases found : findClass ct C with
+      | none => simp [isInstanceTypes, looked, found] at member
+      | some _ =>
+          simp [isInstanceTypes, looked, found] at member
+          cases member
+          exact .isInstance looked found
+
+/-- Valid attribute results from the inferred receiver types. -/
+private def attrAccessTypes (hwfct : WellTypedClassHierarchy ct)
+    (baseBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ base) (attr : Identifier) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  baseBasis.types.flatMap fun receiver => attrResultsFromTy hwfct receiver attr
+
+/-- Every attribute candidate comes from a typed receiver and its selected method. -/
+private theorem attrAccessTypes_sound (hwfct : WellTypedClassHierarchy ct)
+    (baseBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ base)
+    (member : type ∈ attrAccessTypes hwfct baseBasis attr) :
+    HasType hwfct.toWellFormedClassHierarchy Γ (.attrAccess base attr) type.raw := by
+  obtain ⟨receiver, listed, selected⟩ := List.mem_flatMap.mp member
+  exact attrResultsFromTy_sound hwfct receiver selected (baseBasis.types_sound listed)
+
+/-- Valid call results from the inferred callee and argument types. -/
+private def callTypes (hwfct : WellTypedClassHierarchy ct)
+    (calleeBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ callee)
+    (argBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ arg) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  calleeBasis.types.flatMap fun callee =>
+    callResultsFromTy hwfct.toWellFormedClassHierarchy callee argBasis.types
+
+/-- Each call candidate has a typed function requirement and an accepted argument. -/
+private theorem callTypes_sound (hwfct : WellTypedClassHierarchy ct)
+    (calleeBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ callee)
+    (argBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ arg)
+    (member : type ∈ callTypes hwfct calleeBasis argBasis) :
+    HasType hwfct.toWellFormedClassHierarchy Γ (.call callee arg) type.raw := by
+  obtain ⟨callee, listed, selected⟩ := List.mem_flatMap.mp member
+  exact callResultsFromTy_sound callee selected (calleeBasis.types_sound listed)
+    (fun _ member => argBasis.types_sound member)
+
+/-- Form the valid union for every pair of branch candidates. -/
+private def pairwiseUnionTypes (left right : List (WellFormedType names)) : List (WellFormedType names) :=
+  left.flatMap fun first => right.map (WellFormedType.union first)
+
+/-- A union candidate pairs one type from each branch. -/
+private theorem mem_pairwiseUnionTypes :
+    type ∈ pairwiseUnionTypes left right ↔
+      ∃ first ∈ left, ∃ second ∈ right, WellFormedType.union first second = type := by
+  simp [pairwiseUnionTypes]
+
+/-- Valid union candidates for a conditional whose condition has a Bool-compatible type. -/
+private def ordinaryCondTypes (hwfct : WellTypedClassHierarchy ct)
+    (condBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ condExpr)
+    (thenBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ thenBr)
+    (elseBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ elseBr) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  match findBoolWitness hwfct.toWellFormedClassHierarchy condBasis.types with
+  | some _ => pairwiseUnionTypes thenBasis.types elseBasis.types
   | none => []
 
-private theorem ordinaryCondRaw_sound
-    (hwfct : WellFormedClassTable ct)
-    (condBasis : InferredBasis ct Γ condExpr)
-    (thenBasis : InferredBasis ct Γ thenBr)
-    (elseBasis : InferredBasis ct Γ elseBr)
-    (hmem : T ∈ ordinaryCondRaw hwfct condBasis thenBasis elseBasis) :
-    HasType ct Γ (.cond condExpr thenBr elseBr) T := by
-  revert hmem
-  unfold ordinaryCondRaw
-  cases hwitness : findBoolWitness hwfct condBasis.elems condBasis.wf with
-  | none =>
-      intro hmem
-      simp at hmem
+/-- The typing rule combines the condition witness and the two branch candidates. -/
+private theorem ordinaryCondTypes_sound (hwfct : WellTypedClassHierarchy ct)
+    (condBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ condExpr)
+    (thenBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ thenBr)
+    (elseBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ elseBr)
+    (member : type ∈ ordinaryCondTypes hwfct condBasis thenBasis elseBasis) :
+    HasType hwfct.toWellFormedClassHierarchy Γ (.cond condExpr thenBr elseBr) type.raw := by
+  unfold ordinaryCondTypes at member
+  cases found : findBoolWitness hwfct.toWellFormedClassHierarchy condBasis.types with
+  | none => simp [found] at member
   | some witness =>
-      intro hmem
-      simp at hmem
-      rcases (mem_pairwiseUnions.1 hmem) with ⟨Tthen, hthen, Telse, helse, rfl⟩
-      exact .cond
-        (condBasis.sound witness.1 witness.2.1)
-        witness.2.2
-        (thenBasis.sound Tthen hthen)
-        (elseBasis.sound Telse helse)
+      rw [found] at member
+      obtain ⟨first, firstMember, second, secondMember, rfl⟩ := mem_pairwiseUnionTypes.mp member
+      exact .cond (condBasis.types_sound witness.2.1) witness.2.2
+        (thenBasis.types_sound firstMember) (elseBasis.types_sound secondMember)
 
-theorem findBoolWitness_some_of_match
-    (hwfct : WellFormedClassTable ct)
-    (hbasisWf : ∀ T, T ∈ basis → WellFormedTy ct T)
-    (hcond : S ∈ basis)
-    (hbool : IsSubtype ct S (.class_ boolClass)) :
-    ∃ w, findBoolWitness hwfct basis hbasisWf = some w := by
-  induction basis with
-  | nil =>
-      cases hcond
-  | cons T rest ih =>
-      let hwfBool := wellFormed_bool_type hwfct
-      let _ : Decidable (IsSubtype ct T (.class_ boolClass)) :=
-        isSubtype_decidable (ct := ct) (T := T) (U := .class_ boolClass)
-          hwfct (hbasisWf T (by simp)) hwfBool
-      by_cases hsubT : IsSubtype ct T (.class_ boolClass)
-      · refine ⟨⟨T, by exact ⟨by simp, hsubT⟩⟩, ?_⟩
-        simp [findBoolWitness, hsubT]
-      · rcases List.mem_cons.mp hcond with rfl | hcondRest
-        · exact False.elim (hsubT hbool)
-        · obtain ⟨⟨U, hUrest, hUbool⟩, hw⟩ :=
-            ih
-              (fun U hU => hbasisWf U (by simp [hU]))
-              hcondRest
-          refine ⟨⟨U, by exact ⟨by simp [hUrest], hUbool⟩⟩, ?_⟩
-          simp [findBoolWitness, hsubT, hw]
+/-- A Bool-compatible condition and two branch candidates give a union candidate. -/
+private theorem ordinaryCondTypes_mem_of_witness (hwfct : WellTypedClassHierarchy ct)
+    (condBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ condExpr)
+    (thenBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ thenBr)
+    (elseBasis : InferredBasis hwfct.toWellFormedClassHierarchy Γ elseBr)
+    (condition : conditionType ∈ condBasis.types)
+    (accepted : IsSubtype hwfct.toWellFormedClassHierarchy conditionType.raw (.class_ boolClass))
+    (first : firstType ∈ thenBasis.types) (second : secondType ∈ elseBasis.types) :
+    WellFormedType.union firstType secondType ∈ ordinaryCondTypes hwfct condBasis thenBasis elseBasis := by
+  obtain ⟨_, found⟩ := findBoolWitness_some_of_match hwfct.toWellFormedClassHierarchy condition accepted
+  unfold ordinaryCondTypes
+  rw [found]
+  exact mem_pairwiseUnionTypes.mpr ⟨firstType, first, secondType, second, rfl⟩
 
-theorem ordinaryCondRaw_mem_of_witness
-    (hwfct : WellFormedClassTable ct)
-    (condBasis : InferredBasis ct Γ condExpr)
-    (thenBasis : InferredBasis ct Γ thenBr)
-    (elseBasis : InferredBasis ct Γ elseBr)
-    (hcond : Scond ∈ condBasis.elems)
-    (hbool : IsSubtype ct Scond (.class_ boolClass))
-    (hthen : Tthen ∈ thenBasis.elems)
-    (helse : Telse ∈ elseBasis.elems) :
-    (.union Tthen Telse) ∈ ordinaryCondRaw hwfct condBasis thenBasis elseBasis := by
-  obtain ⟨w, hw⟩ :=
-    findBoolWitness_some_of_match
-      (ct := ct) (basis := condBasis.elems)
-      hwfct condBasis.wf hcond hbool
-  unfold ordinaryCondRaw
-  rw [hw]
-  exact mem_pairwiseUnions.2 ⟨Tthen, hthen, Telse, helse, rfl⟩
+/-! ### Class-test conditionals
 
-def lookupWitness? (Γ : TyEnv) (x : Identifier) :
-    Option { T // Γ.lookup x = some T } :=
-  match heq : Γ.lookup x with
-  | none => none
-  | some T => some ⟨T, by simp⟩
+A condition `isInstance x C` refines x's type in both branches.
+The then-branch requires `T & class_ C`; the else-branch requires `T & negClass C`.
+Inference computes valid candidates in these environments and pairs their results. -/
 
-def classLookupWitness? (ct : ClassTable) (C : Identifier) :
-    Option { cls // findClass ct C = some cls } :=
-  match heq : findClass ct C with
-  | none => none
-  | some cls => some ⟨cls, by simp⟩
+/-- Valid union candidates from the two class-test branch environments. -/
+private def specializedCondTypes
+    (Γ : TyEnv) (x C : Identifier) (thenBr elseBr : Expr)
+    (mkThen : (T : Ty) → Γ.lookup x = some T →
+              (cls : Class) → findClass ct C = some cls →
+              InferredBasis structural (Γ.update x (.intersection T (.class_ C))) thenBr)
+    (mkElse : (T : Ty) → Γ.lookup x = some T →
+              (cls : Class) → findClass ct C = some cls →
+              InferredBasis structural (Γ.update x (.intersection T (.negClass C))) elseBr) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  match (Γ.lookup x).attach with
+  | none => []
+  | some ⟨T, looked⟩ =>
+      match (findClass ct C).attach with
+      | none => []
+      | some ⟨cls, found⟩ =>
+          pairwiseUnionTypes (mkThen T looked cls found).types (mkElse T looked cls found).types
 
-theorem lookupWitness?_eq_some
-    {Γ : TyEnv} {x : Identifier} {T : Ty}
-    (hlook : Γ.lookup x = some T) :
-    lookupWitness? Γ x = some ⟨T, hlook⟩ := by
-  unfold lookupWitness?
-  generalize hgen : Γ.lookup x = look at hlook
-  cases look with
-  | none => cases hlook
-  | some T' =>
-      cases hlook
-      rfl
+/-- Class-test candidates combine types proved in the two refined environments. -/
+private theorem specializedCondTypes_sound
+    {mkThen : (T : Ty) → Γ.lookup x = some T →
+      (cls : Class) → findClass ct C = some cls →
+      InferredBasis structural (Γ.update x (.intersection T (.class_ C))) thenBr}
+    {mkElse : (T : Ty) → Γ.lookup x = some T →
+      (cls : Class) → findClass ct C = some cls →
+      InferredBasis structural (Γ.update x (.intersection T (.negClass C))) elseBr}
+    (member : type ∈ specializedCondTypes Γ x C thenBr elseBr mkThen mkElse) :
+    HasType structural Γ (.cond (.isInstance x C) thenBr elseBr) type.raw := by
+  revert member
+  unfold specializedCondTypes
+  cases (Γ.lookup x).attach with
+  | none => intro member; simp at member
+  | some binding =>
+      obtain ⟨annotation, looked⟩ := binding
+      cases (findClass ct C).attach with
+      | none => intro member; simp at member
+      | some selected =>
+          obtain ⟨declaration, found⟩ := selected
+          intro member
+          obtain ⟨first, firstMember, second, secondMember, rfl⟩ := mem_pairwiseUnionTypes.mp member
+          exact .condIsInstance looked found
+            ((mkThen annotation looked declaration found).types_sound firstMember)
+            ((mkElse annotation looked declaration found).types_sound secondMember)
 
-theorem classLookupWitness?_eq_some
-    {ct : ClassTable} {C : Identifier} {cls : Class}
-    (hfind : findClass ct C = some cls) :
-    classLookupWitness? ct C = some ⟨cls, hfind⟩ := by
-  unfold classLookupWitness?
-  generalize hgen : findClass ct C = found at hfind
-  cases found with
-  | none => cases hfind
-  | some cls' =>
-      cases hfind
-      rfl
+/-- Two candidates in the refined branches supply their union to the conditional. -/
+private theorem specializedCondTypes_mem_of_witness
+    {mkThen : (T : Ty) → Γ.lookup x = some T →
+      (cls : Class) → findClass ct C = some cls →
+      InferredBasis structural (Γ.update x (.intersection T (.class_ C))) thenBr}
+    {mkElse : (T : Ty) → Γ.lookup x = some T →
+      (cls : Class) → findClass ct C = some cls →
+      InferredBasis structural (Γ.update x (.intersection T (.negClass C))) elseBr}
+    (looked : Γ.lookup x = some annotation) (found : findClass ct C = some declaration)
+    (first : firstType ∈ (mkThen annotation looked declaration found).types)
+    (second : secondType ∈ (mkElse annotation looked declaration found).types) :
+    WellFormedType.union firstType secondType ∈ specializedCondTypes Γ x C thenBr elseBr mkThen mkElse := by
+  unfold specializedCondTypes
+  rw [Option.attach_eq_some _ ⟨annotation, looked⟩, Option.attach_eq_some _ ⟨declaration, found⟩]
+  exact mem_pairwiseUnionTypes.mpr ⟨firstType, first, secondType, second, rfl⟩
 
-def inferBasisCertified
-    (hwfct : WellFormedClassTable ct)
+/-! ### Main inference dispatcher -/
+
+/-- Compute valid candidates and prove their expression typing together. -/
+def inferBasis (hwfct : WellTypedClassHierarchy ct)
     (Γ : TyEnv) (hΓwf : WellFormedTyEnv ct Γ) :
-    (e : Expr) → InferredBasis ct Γ e
-  | .var x =>
-      match hlook : Γ.lookup x with
-      | some T =>
-          mkInferredBasisOfSound hwfct hΓwf [T] <| by
-            intro U hU
-            simp at hU
-            rcases hU with rfl
-            exact .var hlook
-      | none =>
-          mkInferredBasisOfSound hwfct hΓwf [] <| by
-            intro U hU
-            cases hU
-  | .new cname =>
-      match hfind : findClass ct cname with
-      | none =>
-          mkInferredBasisOfSound hwfct hΓwf [] <| by
-            intro U hU
-            cases hU
-      | some _ =>
-          if hbool : cname = boolClass then
-            mkInferredBasisOfSound hwfct hΓwf [] <| by
-              intro U hU
-              cases hU
-          else if hnone : cname = noneClass then
-            mkInferredBasisOfSound hwfct hΓwf [] <| by
-              intro U hU
-              cases hU
-          else if hbm : cname = boundMethodClass then
-            mkInferredBasisOfSound hwfct hΓwf [] <| by
-              intro U hU
-              cases hU
-          else
-            mkInferredBasisOfSound hwfct hΓwf [.class_ cname] <| by
-              intro U hU
-              simp at hU
-              rcases hU with rfl
-              exact .new hfind hbool hnone hbm
-  | .attrAccess base attrName =>
-      let baseBasis := inferBasisCertified hwfct Γ hΓwf base
-      let raw :=
-        baseBasis.elems.attach.flatMap fun entry =>
-          attrResultsFromTy hwfct entry.1 (baseBasis.wf entry.1 entry.2) attrName
-      mkInferredBasisOfSound hwfct hΓwf raw <| by
-        intro U hU
-        rw [List.mem_flatMap] at hU
-        rcases hU with ⟨entry, _, hentry⟩
-        exact attrResultsFromTy_sound
-          (hwfct := hwfct)
-          (sourceTy := entry.1)
-          (hwfSource := baseBasis.wf entry.1 entry.2)
-          (attr := attrName)
-          (R := U)
-          hentry
-          (baseBasis.sound entry.1 entry.2)
+    (e : Expr) → InferredBasis hwfct.toWellFormedClassHierarchy Γ e
+  | .var x => ⟨varTypes Γ hΓwf x, fun _ member => varTypes_sound hΓwf member⟩
+  | .new name => ⟨newTypes ct name, fun _ member => newTypes_sound member⟩
+  | .attrAccess base attr =>
+      let baseBasis := inferBasis hwfct Γ hΓwf base
+      ⟨attrAccessTypes hwfct baseBasis attr, fun _ member => attrAccessTypes_sound hwfct baseBasis member⟩
   | .call callee arg =>
-      let calleeBasis := inferBasisCertified hwfct Γ hΓwf callee
-      let argBasis := inferBasisCertified hwfct Γ hΓwf arg
-      let raw :=
-        calleeBasis.elems.attach.flatMap fun entry =>
-          callResultsFromTy hwfct entry.1 (calleeBasis.wf entry.1 entry.2)
-            argBasis.elems argBasis.wf
-      mkInferredBasisOfSound hwfct hΓwf raw <| by
-        intro U hU
-        rw [List.mem_flatMap] at hU
-        rcases hU with ⟨entry, _, hentry⟩
-        exact callResultsFromTy_sound
-          (hwfct := hwfct)
-          (calleeTy := entry.1)
-          (hwfCallee := calleeBasis.wf entry.1 entry.2)
-          (argBasis := argBasis.elems)
-          (hArgWf := argBasis.wf)
-          (R := U)
-          hentry
-          (calleeBasis.sound entry.1 entry.2)
-          (fun A hA => argBasis.sound A hA)
+      let calleeBasis := inferBasis hwfct Γ hΓwf callee
+      let argBasis := inferBasis hwfct Γ hΓwf arg
+      ⟨callTypes hwfct calleeBasis argBasis, fun _ member => callTypes_sound hwfct calleeBasis argBasis member⟩
   | .constNone =>
-      mkInferredBasisOfSound hwfct hΓwf [.class_ noneClass] <| by
-        intro U hU
-        simp at hU
-        rcases hU with rfl
-        exact .constNone
+      ⟨[(WellFormedTy.none hwfct.toWellFormedClassHierarchy).toType], fun _ member => by
+        cases List.mem_singleton.mp member
+        exact .constNone⟩
   | .constTrue =>
-      mkInferredBasisOfSound hwfct hΓwf [.class_ boolClass] <| by
-        intro U hU
-        simp at hU
-        rcases hU with rfl
-        exact .constTrue
+      ⟨[(WellFormedTy.bool hwfct.toWellFormedClassHierarchy).toType], fun _ member => by
+        cases List.mem_singleton.mp member
+        exact .constTrue⟩
   | .constFalse =>
-      mkInferredBasisOfSound hwfct hΓwf [.class_ boolClass] <| by
-        intro U hU
-        simp at hU
-        rcases hU with rfl
-        exact .constFalse
+      ⟨[(WellFormedTy.bool hwfct.toWellFormedClassHierarchy).toType], fun _ member => by
+        cases List.mem_singleton.mp member
+        exact .constFalse⟩
   | .cond (.isInstance x C) thenBr elseBr =>
-      let condBasis := inferBasisCertified hwfct Γ hΓwf (.isInstance x C)
-      let thenBasis := inferBasisCertified hwfct Γ hΓwf thenBr
-      let elseBasis := inferBasisCertified hwfct Γ hΓwf elseBr
-      let ordinaryRaw := ordinaryCondRaw hwfct condBasis thenBasis elseBasis
-      let specializedRawCore :=
-        fun (T : Ty) (hlook : Γ.lookup x = some T) (cls : Class)
-            (hfind : findClass ct C = some cls) =>
-          let hmro := (hwfct.allMrosExist _ _ hfind).hmro
-          let hΓThen :=
-            wellFormedTyEnv_update_class
-              (ct := ct) (Γ := Γ) hΓwf hlook hfind hmro
-          let hΓElse :=
-            wellFormedTyEnv_update_negClass
-              (ct := ct) (Γ := Γ) hΓwf hlook hfind hmro
-          let thenNarrow :=
-            inferBasisCertified hwfct
-              (Γ.update x (.intersection T (.class_ C))) hΓThen thenBr
-          let elseNarrow :=
-            inferBasisCertified hwfct
-              (Γ.update x (.intersection T (.negClass C))) hΓElse elseBr
-          pairwiseUnions thenNarrow.elems elseNarrow.elems
-      let specializedRaw :=
-        match lookupWitness? Γ x with
-        | none => []
-        | some w =>
-            match classLookupWitness? ct C with
-            | none => []
-            | some wcls => specializedRawCore w.1 w.2 wcls.1 wcls.2
-      let raw := ordinaryRaw ++ specializedRaw
-      mkInferredBasisOfSound hwfct hΓwf raw <| by
-        intro U hU
-        rcases List.mem_append.mp hU with hU | hU
-        · exact ordinaryCondRaw_sound hwfct condBasis thenBasis elseBasis hU
-        · revert hU
-          cases hlookup : lookupWitness? Γ x with
-          | none =>
-              intro hU
-              simp [specializedRaw, hlookup] at hU
-          | some w =>
-              rcases w with ⟨T, hlook⟩
-              cases hfind : classLookupWitness? ct C with
-              | none =>
-                  intro hU
-                  simp [specializedRaw, hlookup, hfind] at hU
-              | some wcls =>
-                  rcases wcls with ⟨cls, hfindClass⟩
-                  let hmro := (hwfct.allMrosExist _ _ hfindClass).hmro
-                  let hΓThen :=
-                    wellFormedTyEnv_update_class
-                      (ct := ct) (Γ := Γ) hΓwf hlook hfindClass hmro
-                  let hΓElse :=
-                    wellFormedTyEnv_update_negClass
-                      (ct := ct) (Γ := Γ) hΓwf hlook hfindClass hmro
-                  let thenNarrow :=
-                    inferBasisCertified hwfct
-                      (Γ.update x (.intersection T (.class_ C))) hΓThen thenBr
-                  let elseNarrow :=
-                    inferBasisCertified hwfct
-                      (Γ.update x (.intersection T (.negClass C))) hΓElse elseBr
-                  intro hU
-                  have hU' : U ∈ pairwiseUnions thenNarrow.elems elseNarrow.elems := by
-                    simpa [specializedRaw, specializedRawCore, hlookup, hfind, thenNarrow, elseNarrow] using hU
-                  rcases (mem_pairwiseUnions.1 hU') with ⟨Tthen, hthen, Telse, helse, rfl⟩
-                  exact .condIsInstance hlook hfindClass
-                    (thenNarrow.sound Tthen hthen)
-                    (elseNarrow.sound Telse helse)
-  | .cond condExpr thenBr elseBr =>
-      let condBasis := inferBasisCertified hwfct Γ hΓwf condExpr
-      let thenBasis := inferBasisCertified hwfct Γ hΓwf thenBr
-      let elseBasis := inferBasisCertified hwfct Γ hΓwf elseBr
-      let raw := ordinaryCondRaw hwfct condBasis thenBasis elseBasis
-      mkInferredBasisOfSound hwfct hΓwf raw <| by
-        intro U hU
-        exact ordinaryCondRaw_sound hwfct condBasis thenBasis elseBasis hU
+      let condBasis := inferBasis hwfct Γ hΓwf (.isInstance x C)
+      let thenBasis := inferBasis hwfct Γ hΓwf thenBr
+      let elseBasis := inferBasis hwfct Γ hΓwf elseBr
+      let mkThen := fun (T : Ty) (looked : Γ.lookup x = some T)
+          (cls : Class) (found : findClass ct C = some cls) =>
+        inferBasis hwfct (Γ.update x (.intersection T (.class_ C)))
+          (wellFormedTyEnv_update_class hΓwf looked found) thenBr
+      let mkElse := fun (T : Ty) (looked : Γ.lookup x = some T)
+          (cls : Class) (found : findClass ct C = some cls) =>
+        inferBasis hwfct (Γ.update x (.intersection T (.negClass C)))
+          (wellFormedTyEnv_update_negClass hΓwf looked found) elseBr
+      ⟨ordinaryCondTypes hwfct condBasis thenBasis elseBasis ++
+        specializedCondTypes Γ x C thenBr elseBr mkThen mkElse, fun _ member => by
+          rcases List.mem_append.mp member with ordinary | specialized
+          · exact ordinaryCondTypes_sound hwfct condBasis thenBasis elseBasis ordinary
+          · exact specializedCondTypes_sound specialized⟩
+  | .cond condition thenBr elseBr =>
+      let condBasis := inferBasis hwfct Γ hΓwf condition
+      let thenBasis := inferBasis hwfct Γ hΓwf thenBr
+      let elseBasis := inferBasis hwfct Γ hΓwf elseBr
+      ⟨ordinaryCondTypes hwfct condBasis thenBasis elseBasis,
+        fun _ member => ordinaryCondTypes_sound hwfct condBasis thenBasis elseBasis member⟩
   | .isInstance x C =>
-      match hlook : Γ.lookup x, hfind : findClass ct C with
-      | some _, some _ =>
-          mkInferredBasisOfSound hwfct hΓwf [.class_ boolClass] <| by
-            intro U hU
-            simp at hU
-            rcases hU with rfl
-            exact .isInstance hlook hfind
-      | _, _ =>
-          mkInferredBasisOfSound hwfct hΓwf [] <| by
-            intro U hU
-            cases hU
+      ⟨isInstanceTypes hwfct.toWellFormedClassHierarchy Γ x C, fun _ member => isInstanceTypes_sound member⟩
 
-def inferBasis
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (e : Expr) : List Ty :=
-  (inferBasisCertified hwfct Γ hΓwf e).elems
-
-theorem inferBasis_all_wellFormed
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hmem : T ∈ inferBasis hwfct hΓwf e) :
-    WellFormedTy ct T :=
-  (inferBasisCertified hwfct Γ hΓwf e).wf T hmem
-
-theorem inferBasis_sound
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hmem : T ∈ inferBasis hwfct hΓwf e) :
-    HasType ct Γ e T :=
-  (inferBasisCertified hwfct Γ hΓwf e).sound T hmem
-
+/-- A visible variable supplies its validated annotation. -/
 @[simp] theorem inferBasis_var_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
     (hlook : Γ.lookup x = some T) :
-    inferBasis hwfct hΓwf (.var x) = saturateBasis [T] := by
-  unfold inferBasis inferBasisCertified
-  split <;> simp_all [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf (.var x)).types = [(hΓwf x T hlook).toType] := by
+  simp [inferBasis, varTypes, Option.attach_eq_some _ ⟨_, hlook⟩, WellFormedTy.toType]
 
+/-- The None constant supplies the validated NoneType annotation. -/
 @[simp] theorem inferBasis_constNone_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ) :
-    inferBasis hwfct hΓwf .constNone = saturateBasis [.class_ noneClass] := by
-  unfold inferBasis
-  rw [inferBasisCertified.eq_5]
-  simp [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf .constNone).types =
+      [(WellFormedTy.none hwfct.toWellFormedClassHierarchy).toType] := by
+  simp [inferBasis, WellFormedTy.toType]
 
+/-- The True constant supplies the validated Bool annotation. -/
 @[simp] theorem inferBasis_constTrue_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ) :
-    inferBasis hwfct hΓwf .constTrue = saturateBasis [.class_ boolClass] := by
-  unfold inferBasis
-  rw [inferBasisCertified.eq_6]
-  simp [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf .constTrue).types =
+      [(WellFormedTy.bool hwfct.toWellFormedClassHierarchy).toType] := by
+  simp [inferBasis, WellFormedTy.toType]
 
+/-- The False constant supplies the validated Bool annotation. -/
 @[simp] theorem inferBasis_constFalse_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ) :
-    inferBasis hwfct hΓwf .constFalse = saturateBasis [.class_ boolClass] := by
-  unfold inferBasis
-  rw [inferBasisCertified.eq_7]
-  simp [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf .constFalse).types =
+      [(WellFormedTy.bool hwfct.toWellFormedClassHierarchy).toType] := by
+  simp [inferBasis, WellFormedTy.toType]
 
+/-- An instantiable declaration supplies its validated class annotation. -/
 @[simp] theorem inferBasis_new_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
     (hfind : findClass ct cname = some cls)
     (hbool : cname ≠ boolClass)
     (hnone : cname ≠ noneClass)
     (hbm : cname ≠ boundMethodClass) :
-    inferBasis hwfct hΓwf (.new cname) = saturateBasis [.class_ cname] := by
-  unfold inferBasis inferBasisCertified
-  split <;> simp_all [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf (.new cname)).types =
+      [(WellFormedTy.class_of_lookup hfind).toType] := by
+  simp [inferBasis, newTypes, Option.attach_eq_some _ ⟨_, hfind⟩, hbool, hnone, hbm,
+    WellFormedTy.toType]
 
+/-- A class test supplies the validated Bool annotation. -/
 @[simp] theorem inferBasis_isInstance_eq
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ)
     (hlook : Γ.lookup x = some T)
     (hfind : findClass ct C = some cls) :
-    inferBasis hwfct hΓwf (.isInstance x C) = saturateBasis [.class_ boolClass] := by
-  unfold inferBasis inferBasisCertified
-  split <;> simp_all [mkInferredBasisOfSound_elems]
+    (inferBasis hwfct Γ hΓwf (.isInstance x C)).types =
+      [(WellFormedTy.bool hwfct.toWellFormedClassHierarchy).toType] := by
+  simp [inferBasis, isInstanceTypes, hlook, hfind,
+    WellFormedTy.toType]
 
-/-! ### Step lemmas for completeness
+/-! ### Completeness steps
 
-For each non-leaf typing constructor we expose a step lemma: given basis
-witnesses for the sub-derivations, the result type lies in the basis of the
-compound expression. -/
+Each step selects a valid package from the compound expression's candidates.
+The package supplies validity directly to the next subtype check. -/
 
-theorem inferBasis_attrAccess_step_general
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hSb : Sb ∈ inferBasis hwfct hΓwf base)
-    (hsub : IsSubtype ct Sb viewTy)
-    (hviewMem : (viewTy, R) ∈ allAttrReceiverViews hwfct attrName) :
-    R ∈ inferBasis hwfct hΓwf (.attrAccess base attrName) := by
-  let baseCert := inferBasisCertified hwfct Γ hΓwf base
-  show R ∈ (inferBasisCertified hwfct Γ hΓwf (.attrAccess base attrName)).elems
-  refine saturateBasis_mem_of_mem (List.mem_flatMap.mpr ⟨⟨Sb, hSb⟩, by simp, ?_⟩)
-  exact attrResultsFromTy_complete_of_member hwfct
-    (hwfSource := baseCert.wf Sb hSb) hsub hviewMem
+/-- A receiver case supplies a candidate with its declared attribute result. -/
+private theorem inferBasis_attrAccess_step_general
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hSb : Sb ∈ (inferBasis hwfct Γ hΓwf base).types)
+    (hsub : IsSubtype hwfct.toWellFormedClassHierarchy Sb.raw view.receiver.raw)
+    (member : view ∈ attrReceiverViews hwfct attrName) :
+    view.result ∈ (inferBasis hwfct Γ hΓwf (.attrAccess base attrName)).types := by
+  apply InferredBasis.candidate_member
+  exact List.mem_flatMap.mpr ⟨Sb, hSb,
+    attrResultsFromTy_complete_of_member hwfct Sb hsub member⟩
 
+/-- A class method supplies a candidate with exactly its declared function type. -/
 theorem inferBasis_attrAccess_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hSb : Sb ∈ inferBasis hwfct hΓwf base)
-    (hsub : IsSubtype ct Sb (.class_ cname))
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hSb : Sb ∈ (inferBasis hwfct Γ hΓwf base).types)
+    (hsub : IsSubtype hwfct.toWellFormedClassHierarchy Sb.raw (.class_ cname))
     (hfmt : FindMethodType ct cname attrName paramTy returnTy) :
-    (.callable paramTy returnTy) ∈ inferBasis hwfct hΓwf (.attrAccess base attrName) :=
-  inferBasis_attrAccess_step_general hwfct hΓwf hSb hsub
-    (attrReceiverView_class_member hwfct hfmt)
+    ∃ result ∈ (inferBasis hwfct Γ hΓwf (.attrAccess base attrName)).types,
+      result.raw = .callable paramTy returnTy := by
+  obtain ⟨view, member, inputEqual, resultEqual⟩ := attrReceiverView_class_member hwfct hfmt
+  exact ⟨view.result, inferBasis_attrAccess_step_general hwfct hΓwf hSb
+    (inputEqual.symm ▸ hsub) member, resultEqual⟩
 
+/-- A union receiver supplies the union of its two declared method types. -/
 theorem inferBasis_attrAccessUnion_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hSb : Sb ∈ inferBasis hwfct hΓwf base)
-    (hsub : IsSubtype ct Sb (.union (.class_ c1) (.class_ c2)))
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hSb : Sb ∈ (inferBasis hwfct Γ hΓwf base).types)
+    (hsub : IsSubtype hwfct.toWellFormedClassHierarchy Sb.raw (.union (.class_ c1) (.class_ c2)))
     (hfmt1 : FindMethodType ct c1 attrName p1 r1)
     (hfmt2 : FindMethodType ct c2 attrName p2 r2) :
-    (.union (.callable p1 r1) (.callable p2 r2)) ∈
-      inferBasis hwfct hΓwf (.attrAccess base attrName) :=
-  inferBasis_attrAccess_step_general hwfct hΓwf hSb hsub
-    (attrReceiverView_union_member hwfct hfmt1 hfmt2)
+    ∃ result ∈ (inferBasis hwfct Γ hΓwf (.attrAccess base attrName)).types,
+      result.raw = .union (.callable p1 r1) (.callable p2 r2) := by
+  obtain ⟨view, member, inputEqual, resultEqual⟩ := attrReceiverView_union_member hwfct hfmt1 hfmt2
+  exact ⟨view.result, inferBasis_attrAccess_step_general hwfct hΓwf hSb
+    (inputEqual.symm ▸ hsub) member, resultEqual⟩
 
+/-- The call candidates contain a package refining the declarative result. -/
 theorem inferBasis_call_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hSc : Sc ∈ inferBasis hwfct hΓwf callee)
-    (hSa : Sa ∈ inferBasis hwfct hΓwf arg)
-    (hsubCallable : IsSubtype ct Sc (.callable paramTy returnTy))
-    (hsubArg : IsSubtype ct Sa paramTy) :
-    ∃ R, R ∈ inferBasis hwfct hΓwf (.call callee arg) ∧ IsSubtype ct R returnTy := by
-  let calleeCert := inferBasisCertified hwfct Γ hΓwf callee
-  let argCert := inferBasisCertified hwfct Γ hΓwf arg
-  obtain ⟨R, hR, hRsub⟩ :=
-    callResultsFromTy_complete (hwfct := hwfct) (calleeTy := Sc)
-      (hwfCallee := calleeCert.wf Sc hSc)
-      (argBasis := argCert.elems) (hArgWf := argCert.wf)
-      (P := paramTy) (R := returnTy) (A := Sa)
-      hsubCallable hSa hsubArg
-  refine ⟨R, ?_, hRsub⟩
-  show R ∈ (inferBasisCertified hwfct Γ hΓwf (.call callee arg)).elems
-  exact saturateBasis_mem_of_mem
-    (List.mem_flatMap.mpr ⟨⟨Sc, hSc⟩, by simp, hR⟩)
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hSc : Sc ∈ (inferBasis hwfct Γ hΓwf callee).types)
+    (hSa : Sa ∈ (inferBasis hwfct Γ hΓwf arg).types)
+    (hsubCallable : IsSubtype hwfct.toWellFormedClassHierarchy Sc.raw (.callable paramTy returnTy))
+    (hsubArg : IsSubtype hwfct.toWellFormedClassHierarchy Sa.raw paramTy) :
+    ∃ result ∈ (inferBasis hwfct Γ hΓwf (.call callee arg)).types,
+      IsSubtype hwfct.toWellFormedClassHierarchy result.raw returnTy := by
+  obtain ⟨result, selected, included⟩ := callResultsFromTy_complete Sc hsubCallable hSa hsubArg
+  exact ⟨result, InferredBasis.candidate_member _
+    (List.mem_flatMap.mpr ⟨Sc, hSc, selected⟩), included⟩
 
+/-- An ordinary conditional contains the union of two selected branch packages. -/
 theorem inferBasis_cond_ordinary_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hSc : Sc ∈ inferBasis hwfct hΓwf condExpr)
-    (hbool : IsSubtype ct Sc (.class_ boolClass))
-    (hSt : St ∈ inferBasis hwfct hΓwf thenBr)
-    (hSe : Se ∈ inferBasis hwfct hΓwf elseBr) :
-    (.union St Se) ∈ inferBasis hwfct hΓwf (.cond condExpr thenBr elseBr) := by
-  have hord :
-      (.union St Se) ∈
-        ordinaryCondRaw hwfct
-          (inferBasisCertified hwfct Γ hΓwf condExpr)
-          (inferBasisCertified hwfct Γ hΓwf thenBr)
-          (inferBasisCertified hwfct Γ hΓwf elseBr) :=
-    ordinaryCondRaw_mem_of_witness (ct := ct) (Γ := Γ)
-      hwfct _ _ _ hSc hbool hSt hSe
-  show (.union St Se) ∈
-    (inferBasisCertified hwfct Γ hΓwf (.cond condExpr thenBr elseBr)).elems
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hSc : Sc ∈ (inferBasis hwfct Γ hΓwf condExpr).types)
+    (hbool : IsSubtype hwfct.toWellFormedClassHierarchy Sc.raw (.class_ boolClass))
+    (hSt : St ∈ (inferBasis hwfct Γ hΓwf thenBr).types)
+    (hSe : Se ∈ (inferBasis hwfct Γ hΓwf elseBr).types) :
+    WellFormedType.union St Se ∈
+      (inferBasis hwfct Γ hΓwf (.cond condExpr thenBr elseBr)).types := by
+  have member := ordinaryCondTypes_mem_of_witness hwfct
+    (inferBasis hwfct Γ hΓwf condExpr)
+    (inferBasis hwfct Γ hΓwf thenBr)
+    (inferBasis hwfct Γ hΓwf elseBr) hSc hbool hSt hSe
   cases condExpr with
   | isInstance _ _ =>
-      exact saturateBasis_mem_of_mem (List.mem_append.mpr (Or.inl hord))
-  | _ => all_goals exact saturateBasis_mem_of_mem hord
+      apply InferredBasis.candidate_member
+      exact List.mem_append.mpr (Or.inl member)
+  | _ => exact InferredBasis.candidate_member _ member
 
+/-- A class-test conditional contains the union of its refined branch packages. -/
 theorem inferBasis_cond_isInstance_specialized_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hlook : Γ.lookup x = some T)
-    (hfind : findClass ct C = some cls)
-    (St Se : Ty)
-    (hSt : St ∈ inferBasis hwfct
-            (Γ := Γ.update x (.intersection T (.class_ C)))
-            (wellFormedTyEnv_update_class hΓwf hlook hfind
-              (hwfct.allMrosExist _ _ hfind).hmro)
-            thenBr)
-    (hSe : Se ∈ inferBasis hwfct
-            (Γ := Γ.update x (.intersection T (.negClass C)))
-            (wellFormedTyEnv_update_negClass hΓwf hlook hfind
-              (hwfct.allMrosExist _ _ hfind).hmro)
-            elseBr) :
-    (.union St Se) ∈
-      inferBasis hwfct hΓwf (.cond (.isInstance x C) thenBr elseBr) := by
-  show (.union St Se) ∈
-    (inferBasisCertified hwfct Γ hΓwf (.cond (.isInstance x C) thenBr elseBr)).elems
-  refine saturateBasis_mem_of_mem (List.mem_append.mpr (Or.inr ?_))
-  show (.union St Se) ∈
-    (match lookupWitness? Γ x with
-    | none => []
-    | some w =>
-        match classLookupWitness? ct C with
-        | none => []
-        | some wcls =>
-            let hmro := (hwfct.allMrosExist _ _ wcls.2).hmro
-            let hΓThen := wellFormedTyEnv_update_class hΓwf w.2 wcls.2 hmro
-            let hΓElse := wellFormedTyEnv_update_negClass hΓwf w.2 wcls.2 hmro
-            let thenNarrow := inferBasisCertified hwfct
-              (Γ.update x (.intersection w.1 (.class_ C))) hΓThen thenBr
-            let elseNarrow := inferBasisCertified hwfct
-              (Γ.update x (.intersection w.1 (.negClass C))) hΓElse elseBr
-            pairwiseUnions thenNarrow.elems elseNarrow.elems)
-  rw [lookupWitness?_eq_some hlook, classLookupWitness?_eq_some hfind]
-  exact mem_pairwiseUnions.mpr ⟨St, hSt, Se, hSe, rfl⟩
-
-theorem inferBasis_intersection_step
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (hS1 : S1 ∈ inferBasis hwfct hΓwf e)
-    (hS2 : S2 ∈ inferBasis hwfct hΓwf e) :
-    ∃ U, U ∈ inferBasis hwfct hΓwf e ∧ IsSubtype ct U (.intersection S1 S2) := by
-  let basis := inferBasisCertified hwfct Γ hΓwf e
-  have h1 : S1 ∈ saturateBasis basis.raw := basis.saturated ▸ hS1
-  have h2 : S2 ∈ saturateBasis basis.raw := basis.saturated ▸ hS2
-  obtain ⟨U, hUmem, hUsub⟩ := saturateBasis_intersection_cover h1 h2
-  refine ⟨U, ?_, hUsub⟩
-  show U ∈ basis.elems
-  rw [basis.saturated]
-  exact hUmem
+    (hwfct : WellTypedClassHierarchy ct) (hΓwf : WellFormedTyEnv ct Γ)
+    (hlook : Γ.lookup x = some T) (hfind : findClass ct C = some cls)
+    (St Se : WellFormedType (ct.map ClassDecl.name))
+    (hSt : St ∈ (inferBasis hwfct
+      (Γ.update x (.intersection T (.class_ C)))
+      (wellFormedTyEnv_update_class hΓwf hlook hfind) thenBr).types)
+    (hSe : Se ∈ (inferBasis hwfct
+      (Γ.update x (.intersection T (.negClass C)))
+      (wellFormedTyEnv_update_negClass hΓwf hlook hfind) elseBr).types) :
+    WellFormedType.union St Se ∈
+      (inferBasis hwfct Γ hΓwf (.cond (.isInstance x C) thenBr elseBr)).types := by
+  apply InferredBasis.candidate_member
+  exact List.mem_append.mpr (Or.inr
+    (specializedCondTypes_mem_of_witness hlook hfind hSt hSe))

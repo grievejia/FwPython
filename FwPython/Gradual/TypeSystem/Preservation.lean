@@ -1,9 +1,8 @@
 import FwPython.Gradual.TypeSystem.Safety
 import FwPython.Gradual.TypeSystem.EnforcementClassification
+import FwPython.Gradual.TypeSystem.IsInstanceRefinement
 import FwPython.Gradual.Checked.Enforce
 import FwPython.Gradual.Checked.HeapPreservation
-import FwPython.Static.Subtyping.Inversion
-import FwPython.Static.Subtyping.AbstractSemantics
 
 /-! ## Preservation for checked safe states
 
@@ -12,15 +11,17 @@ produces a safe checked state. Blame is a valid safe control (it
 propagates through frames without issue). Runtime errors have no
 `CheckedControlHasType` constructor and are ruled out by contradiction. -/
 
+variable {gct : GClassTable} {structural : WellFormedClassHierarchy (eraseClassTable gct)}
+
 namespace Checked
 
 /-! ### Heap monotonicity for typing judgments
 
 When the heap is extended by allocation, existing typing judgments are
-preserved because all old heap lookups are still valid. -/
+preserved because existing heap lookups remain valid. -/
 
 /-- Heap monotonicity for `CheckedCallableView`. -/
-private theorem checkedCallableView_heapMono
+theorem checkedCallableView_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
     (hview : CheckedCallableView gct cct heap v) :
     CheckedCallableView gct cct heap' v :=
@@ -28,7 +29,7 @@ private theorem checkedCallableView_heapMono
   | .objRefBoundMethod hlook hrecv hmro => .objRefBoundMethod (hmono _ _ hlook) (hmono _ _ hrecv) hmro
 
 /-- Heap monotonicity for CheckedAnyShape. -/
-private theorem checkedAnyShape_heapMono
+theorem checkedAnyShape_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
     (hshape : CheckedAnyShape gct cct heap v) :
     CheckedAnyShape gct cct heap' v :=
@@ -36,7 +37,7 @@ private theorem checkedAnyShape_heapMono
   | .objRef hlook => .objRef (hmono _ _ hlook)
 
 /-- Heap monotonicity for CheckedClassView. -/
-private theorem checkedClassView_heapMono
+theorem checkedClassView_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
     (hview : CheckedClassView gct cct heap v cname) :
     CheckedClassView gct cct heap' v cname :=
@@ -44,7 +45,7 @@ private theorem checkedClassView_heapMono
   | .objRef hlook hfind hmro hmem => .objRef (hmono _ _ hlook) hfind hmro hmem
 
 /-- Witness heap monotonicity. -/
-private theorem checkedValueWitness_heapMono
+theorem checkedValueWitness_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
     (w : CheckedValueWitness gct cct heap v G) :
     CheckedValueWitness gct cct heap' v G :=
@@ -59,7 +60,7 @@ private theorem checkedValueWitness_heapMono
       (checkedValueWitness_heapMono hmono wH))
   | .mk hwf (.negClass hshape hblame) =>
     .mk hwf (.negClass (checkedAnyShape_heapMono hmono hshape)
-      (fun ℓ => enforceValue_heapMono hmono (hblame ℓ)))
+      (enforceValue_heapMono hmono hblame))
 
 /-! ### Frame environment preservation lemmas
 
@@ -75,49 +76,42 @@ We prove these by case analysis on the derivation. -/
 /-- Helper: for frames whose base constructors always have `midΓ = inΓ`,
     prove `Γ' = Γ` by case analysis. -/
 private theorem frameHasType_env_eq_attrAccess
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : ∃ a, f = .attrAccess a) : Γ' = Γ := by
   induction hf with
   | attrAccess _ | attrAccessUnion _ _ => rfl
   | _ => obtain ⟨_, h⟩ := hframe; cases h
 
 private theorem frameHasType_env_eq_callCallee
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
-    (hframe : ∃ a p r labels, f = .callCallee a p r labels) : Γ' = Γ := by
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
+    (hframe : ∃ a p r obligation, f = .callCallee a p r obligation) : Γ' = Γ := by
   induction hf with
   | callCallee _ _ _ _ _ _ => rfl
   | _ => obtain ⟨_, _, _, _, h⟩ := hframe; cases h
 
 private theorem frameHasType_env_eq_awaitArgument
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
-    (hframe : ∃ a b r labels, f = .awaitArgument a b r labels) : Γ' = Γ := by
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
+    (hframe : ∃ a b r obligation, f = .awaitArgument a b r obligation) : Γ' = Γ := by
   induction hf with
   | awaitArgument _ _ _ _ _ _ _ _ => rfl
   | _ => obtain ⟨_, _, _, _, h⟩ := hframe; cases h
 
-private theorem frameHasType_env_eq_callValue
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
-    (hframe : ∃ a p r labels, f = .callValue a p r labels) : Γ' = Γ := by
-  induction hf with
-  | callValue _ _ _ _ _ => rfl
-  | _ => obtain ⟨_, _, _, _, h⟩ := hframe; cases h
-
 private theorem frameHasType_env_eq_cond
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : ∃ a b, f = .cond a b) : Γ' = Γ := by
   induction hf with
   | cond _ _ => rfl
   | _ => obtain ⟨_, _, h⟩ := hframe; cases h
 
 private theorem frameHasType_env_eq_enforce
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : ∃ a b, f = .enforce a b) : Γ' = Γ := by
   induction hf with
   | enforce _ _ => rfl
   | _ => obtain ⟨_, _, h⟩ := hframe; cases h
 
 private theorem frameHasType_env_eq_dynAttrAccess
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : ∃ a b, f = .dynAttrAccess a b) : Γ' = Γ := by
   induction hf with
   | dynAttrAccess => rfl
@@ -125,7 +119,7 @@ private theorem frameHasType_env_eq_dynAttrAccess
 
 /-- Extract caller-env typing from a `returnTo` frame. -/
 private theorem frameHasType_returnTo_callerEnv
-    (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : f = .returnTo callerEnv) :
     CheckedEnvHasType gct cct heap callerEnv Γ' := by
   induction hf with
@@ -139,7 +133,7 @@ typing derivation to a value witness derivation. -/
 
 /-- If `.constNone` has type `G`, the noneOid object reference has value witness `G`. -/
 private theorem constNone_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .constNone)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .constNone)
     (hheap : CheckedHeapWellFormed gct cct heap) :
     CheckedValueWitness gct cct heap (.objRef noneOid) G := by
   cases hty with
@@ -153,7 +147,7 @@ private theorem constNone_val_of_expr
 
 /-- If `.constTrue` has type `G`, the trueOid object reference has value witness `G`. -/
 private theorem constTrue_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .constTrue)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .constTrue)
     (hheap : CheckedHeapWellFormed gct cct heap) :
     CheckedValueWitness gct cct heap (.objRef trueOid) G := by
   cases hty with
@@ -167,7 +161,7 @@ private theorem constTrue_val_of_expr
 
 /-- If `.constFalse` has type `G`, the falseOid object reference has value witness `G`. -/
 private theorem constFalse_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .constFalse)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .constFalse)
     (hheap : CheckedHeapWellFormed gct cct heap) :
     CheckedValueWitness gct cct heap (.objRef falseOid) G := by
   cases hty with
@@ -181,7 +175,7 @@ private theorem constFalse_val_of_expr
 
 /-- If `.var x` has type `G` and `env.lookup x = some v`, then `v` has value witness `G`. -/
 private theorem var_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .var x)
     (henv : CheckedEnvHasType gct cct heap env Γ)
     (hlookup : env.lookup x = some v) :
@@ -197,7 +191,7 @@ private theorem var_val_of_expr
 /-- If `.new cname` has type `G` and the allocation produces `(oid, heap')`,
     then `objRef oid` has value witness `G` in the extended heap. -/
 private theorem new_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .new cname)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .new cname)
     {heap : CheckedHeap}
     (hwfct : WellFormedGClassTableCore gct)
     (halloc : heap.alloc ⟨cname, .ordinary⟩ = (oid, heap')) :
@@ -214,7 +208,7 @@ private theorem new_val_of_expr
 
 /-- If `.isInstance x C` has type `G`, then the boolean result value has witness `G`. -/
 private theorem isInstance_val_of_expr
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .isInstance x C)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .isInstance x C)
     (hheap : CheckedHeapWellFormed gct cct heap)
     (result : CheckedValue) (hresult : result = .objRef trueOid ∨ result = .objRef falseOid) :
     CheckedValueWitness gct cct heap result G := by
@@ -244,7 +238,7 @@ evaluation time, the evaluation condition is contradictory. -/
 
 /-- A well-typed variable lookup implies the variable is in the runtime env. -/
 private theorem var_lookup_ne_none
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .var x)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .var x)
     (henv : CheckedEnvHasType gct cct heap env Γ) :
     env.lookup x ≠ none := by
   induction hty with
@@ -256,7 +250,7 @@ private theorem var_lookup_ne_none
 
 /-- A well-typed `new` expression implies the class exists. -/
 private theorem new_class_exists
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .new cname) :
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .new cname) :
     ∃ c, findGClass gct cname = some c := by
   induction hty with
   | new hfind _ _ _ => exact ⟨_, CheckedExpr.new.inj he ▸ hfind⟩
@@ -264,7 +258,7 @@ private theorem new_class_exists
 
 /-- A well-typed `new` expression implies the class is not a builtin. -/
 private theorem new_not_builtin
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .new cname) :
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .new cname) :
     cname ≠ boolClass ∧ cname ≠ noneClass ∧ cname ≠ boundMethodClass := by
   induction hty with
   | new _ hne_bool hne_none hne_bm => exact CheckedExpr.new.inj he ▸ ⟨hne_bool, hne_none, hne_bm⟩
@@ -272,7 +266,7 @@ private theorem new_not_builtin
 
 /-- A well-typed `isInstance` implies the variable is in the type env. -/
 private theorem isInstance_var_exists
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G) (he : e = .isInstance x C)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G) (he : e = .isInstance x C)
     (henv : CheckedEnvHasType gct cct heap env Γ) :
     env.lookup x ≠ none := by
   induction hty with
@@ -284,7 +278,7 @@ private theorem isInstance_var_exists
 
 /-- A well-typed `cond (isInstance x C)` implies the variable is in the runtime env. -/
 private theorem condIsInstance_var_exists
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .cond (.isInstance x C) thenBr elseBr)
     (henv : CheckedEnvHasType gct cct heap env Γ) :
     env.lookup x ≠ none := by
@@ -298,15 +292,15 @@ private theorem condIsInstance_var_exists
 
 /-! ### Focus decomposition lemmas
 
-Decompose an expression typing `CheckedHasType gct Γ (compound subexpr ...) G`
+Decompose an expression typing `CheckedHasType gct structural Γ (compound subexpr ...) G`
 into a subexpression typing + a frame typing. -/
 
 /-- Decompose `.attrAccess base attrName` into base typing + attrAccess frame. -/
 private theorem focus_attrAccess
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .attrAccess base attrName) (cct : CheckedClassTable) (heap : CheckedHeap) :
-    ∃ G₁, CheckedHasType gct Γ base G₁ ∧
-      CheckedFrameHasType gct cct heap Γ G₁ Γ G (.attrAccess attrName) := by
+    ∃ G₁, CheckedHasType gct structural Γ base G₁ ∧
+      CheckedFrameHasType gct structural cct heap Γ G₁ Γ G (.attrAccess attrName) := by
   cases hty with
   | attrAccess hbase hfind =>
     obtain ⟨rfl, rfl⟩ := CheckedExpr.attrAccess.inj he
@@ -316,26 +310,27 @@ private theorem focus_attrAccess
     exact ⟨_, hbase, .attrAccessUnion hfind1 hfind2⟩
   | _ => exact absurd he nofun
 
-/-- Decompose `.call callee arg paramTy returnTy returnLabels` into callee typing + callCallee frame. -/
+/-- Decompose `.call callee arg paramTy returnTy returnObligation` into callee typing + callCallee frame. -/
 private theorem focus_call
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
-    (he : e = .call callee arg paramTy returnTy returnLabels)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
+    (he : e = .call callee arg paramTy returnTy returnObligation)
     (cct : CheckedClassTable) (heap : CheckedHeap) :
-    ∃ G₁, CheckedHasType gct Γ callee G₁ ∧
-      CheckedFrameHasType gct cct heap Γ G₁ Γ G (.callCallee arg paramTy returnTy returnLabels) := by
+    ∃ G₁, CheckedHasType gct structural Γ callee G₁ ∧
+      CheckedFrameHasType gct structural cct heap Γ G₁ Γ G
+        (.callCallee arg paramTy returnTy returnObligation) := by
   cases hty with
   | call hcallee harg hassign htP htR hwfP hwfR =>
-    obtain ⟨rfl, rfl, rfl, rfl, rfl⟩ := checkedExpr_call_inversion he
+    obtain ⟨rfl, rfl, rfl, rfl, rfl⟩ := CheckedExpr.call.inj he
     exact ⟨_, hcallee, .callCallee harg hassign htP htR hwfP hwfR⟩
   | _ => exact absurd he nofun
 
 /-- Decompose `.cond condExpr thenBr elseBr` (non-isInstance) into condExpr typing + cond frame. -/
 private theorem focus_cond
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .cond condExpr thenBr elseBr)
     (hne : ∀ x C, condExpr ≠ .isInstance x C) (cct : CheckedClassTable) (heap : CheckedHeap) :
-    ∃ G₁, CheckedHasType gct Γ condExpr G₁ ∧
-      CheckedFrameHasType gct cct heap Γ G₁ Γ G (.cond thenBr elseBr) := by
+    ∃ G₁, CheckedHasType gct structural Γ condExpr G₁ ∧
+      CheckedFrameHasType gct structural cct heap Γ G₁ Γ G (.cond thenBr elseBr) := by
   cases hty with
   | cond hcond hthen helse _htgt =>
     obtain ⟨rfl, rfl, rfl⟩ := CheckedExpr.cond.inj he
@@ -347,10 +342,10 @@ private theorem focus_cond
 
 /-- Decompose `.enforce e c ℓ` into inner typing + enforce frame. -/
 private theorem focus_enforce
-    {e' : CheckedExpr} (hty : CheckedHasType gct Γ e' G)
+    {e' : CheckedExpr} (hty : CheckedHasType gct structural Γ e' G)
     (he : e' = .enforce e c ℓ) (cct : CheckedClassTable) (heap : CheckedHeap) :
-    ∃ G₁, CheckedHasType gct Γ e G₁ ∧
-      CheckedFrameHasType gct cct heap Γ G₁ Γ G (.enforce c ℓ) := by
+    ∃ G₁, CheckedHasType gct structural Γ e G₁ ∧
+      CheckedFrameHasType gct structural cct heap Γ G₁ Γ G (.enforce c ℓ) := by
   cases hty with
   | enforce hinner hwf htgt =>
     obtain ⟨rfl, rfl, rfl⟩ := CheckedExpr.enforce.inj he
@@ -359,10 +354,10 @@ private theorem focus_enforce
 
 /-- Decompose `.dynAttrAccess base attrName ℓ` into base typing + dynAttrAccess frame. -/
 private theorem focus_dynAttrAccess
-    {e : CheckedExpr} (hty : CheckedHasType gct Γ e G)
+    {e : CheckedExpr} (hty : CheckedHasType gct structural Γ e G)
     (he : e = .dynAttrAccess base attrName ℓ) (cct : CheckedClassTable) (heap : CheckedHeap) :
-    ∃ G₁, CheckedHasType gct Γ base G₁ ∧
-      CheckedFrameHasType gct cct heap Γ G₁ Γ G (.dynAttrAccess attrName ℓ) := by
+    ∃ G₁, CheckedHasType gct structural Γ base G₁ ∧
+      CheckedFrameHasType gct structural cct heap Γ G₁ Γ G (.dynAttrAccess attrName ℓ) := by
   cases hty with
   | dynAttrAccess hbase =>
     obtain ⟨rfl, rfl, rfl⟩ := CheckedExpr.dynAttrAccess.inj he
@@ -374,7 +369,7 @@ private theorem focus_dynAttrAccess
 /-- For a returnTo frame, transfer a value at `inTy` to a value at
     the frame's output type in the caller environment. -/
 private theorem returnTo_value_transfer
-    (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : f = .returnTo callerEnv)
     (w : CheckedValueWitness gct cct heap v inTy) :
     CheckedEnvHasType gct cct heap callerEnv Γ' ∧
@@ -412,16 +407,14 @@ private theorem checkedEnvHasType_updateWitness
 /-- Frame typing is monotone in the heap. -/
 private theorem checkedFrameHasType_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f) :
-    CheckedFrameHasType gct cct heap' Γ inTy Γ' outTy f := by
+    (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f) :
+    CheckedFrameHasType gct structural cct heap' Γ inTy Γ' outTy f := by
   induction hf with
   | attrAccess hfind => exact .attrAccess hfind
   | attrAccessUnion hf1 hf2 => exact .attrAccessUnion hf1 hf2
   | dynAttrAccess => exact .dynAttrAccess
   | callCallee harg hassign htP htR hwfP hwfR =>
     exact .callCallee harg hassign htP htR hwfP hwfR
-  | callValue hvty htP htR hwfP hwfR =>
-    exact .callValue (checkedValueWitness_heapMono hmono hvty) htP htR hwfP hwfR
   | awaitArgument hlook hmro htP htR htReturn hwfP hwfR hwfReturn =>
     exact .awaitArgument (hmono _ _ hlook) hmro htP htR htReturn hwfP hwfR hwfReturn
   | cond hthen helse => exact .cond hthen helse
@@ -432,8 +425,8 @@ private theorem checkedFrameHasType_heapMono
 /-- Continuation typing is monotone in the heap. -/
 private theorem checkedContinuationHasType_heapMono
     (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (hcont : CheckedContinuationHasType gct cct heap Γ G outΓ outTy k) :
-    CheckedContinuationHasType gct cct heap' Γ G outΓ outTy k := by
+    (hcont : CheckedContinuationHasType gct structural cct heap Γ G outΓ outTy k) :
+    CheckedContinuationHasType gct structural cct heap' Γ G outΓ outTy k := by
   induction hcont with
   | nil => exact .nil
   | cons hf _ ih =>
@@ -445,9 +438,9 @@ Extract branch typings from a cond frame. -/
 
 /-- From a cond frame, produce a control typing for the then branch. -/
 private theorem cond_frame_then_branch
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : f = .cond thenBr elseBr) :
-    Γ' = Γ ∧ CheckedControlHasType gct cct heap Γ (.expr thenBr) outTy := by
+    Γ' = Γ ∧ CheckedControlHasType gct structural cct heap Γ (.expr thenBr) outTy := by
   induction hf with
   | cond hthen _ =>
     obtain ⟨rfl, rfl⟩ := Frame.cond.inj hframe
@@ -456,23 +449,14 @@ private theorem cond_frame_then_branch
 
 /-- From a cond frame, produce a control typing for the else branch. -/
 private theorem cond_frame_else_branch
-    {f : Frame} (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    {f : Frame} (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : f = .cond thenBr elseBr) :
-    Γ' = Γ ∧ CheckedControlHasType gct cct heap Γ (.expr elseBr) outTy := by
+    Γ' = Γ ∧ CheckedControlHasType gct structural cct heap Γ (.expr elseBr) outTy := by
   induction hf with
   | cond _ helse =>
     obtain ⟨rfl, rfl⟩ := Frame.cond.inj hframe
     exact ⟨rfl, .expr helse⟩
   | _ => exact absurd hframe nofun
-
-/-! ### Witness bridge lemmas -/
-
-private theorem wellFormedGTyEnv_of_checkedEnvHasType
-    (henv : CheckedEnvHasType gct cct heap env Γ) :
-    ∀ x G, Γ.lookup x = some G → WellFormedGTy gct G := by
-  intro x Gx hlook
-  obtain ⟨v, _, hvty⟩ := henv x Gx hlook
-  exact hvty.wf
 
 /-- From an exact class witness at `class_ boolClass` on an objRef,
     the oid is trueOid or falseOid. -/
@@ -483,27 +467,22 @@ private theorem boolClass_objRef_is_true_or_false
     oid = trueOid ∨ oid = falseOid := by
   cases checkedValueWitness_class_view w with
   | objRef hlook hfind hmro hmem =>
-    exact hheap.boolExhaustive oid _ hlook (hwfct.raw.boolLeaf _ _ _ hfind hmro hmem)
+    exact hheap.boolExhaustive oid _ hlook (hwfct.raw.sealedLeaf boolClass (by simp [sealedClasses]) _ _ _ hfind hmro hmem)
 /-! ### Frame value transfer functions -/
 
-/-- For an enforce frame, extract environment equality and the enforce
-    target's contract, well-formedness, and admissibility.
-    NOTE: The original `enforce_value_transfer` asked for a value witness
-    at the output type for the SAME value `v`. This is ill-posed because
-    enforce steps transform the value (potentially wrapping callables).
-    Preservation for enforce steps should use `enforce_ok_has_witness` on
-    the post-enforcement value, not transfer the pre-enforcement value's
-    witness. This replacement extracts the provable parts. -/
+/-- For an enforce frame, extract environment equality and the enforce target's
+    contract, well-formedness, and admissibility. Successful enforcement
+    constructs the output witness from the post-enforcement value, so the frame
+    exposes exactly the facts needed by that preservation case. -/
 private theorem enforce_frame_info
-    (hf : CheckedFrameHasType gct cct heap Γ inTy Γ' outTy f)
+    (hf : CheckedFrameHasType gct structural cct heap Γ inTy Γ' outTy f)
     (hframe : f = .enforce c ℓ) :
     Γ' = Γ ∧ CompilesBoundary outTy (compileBoundaryTarget c) ∧ WellFormedGTy gct outTy ∧
-    RuntimePublicAnnotation gct outTy := by
+    CheckedTargetTy gct outTy := by
   induction hf with
   | enforce hwf htgt =>
     obtain ⟨rfl, rfl⟩ := Frame.enforce.inj hframe
-    exact ⟨rfl, by simp [CompilesBoundary, compileBoundaryTarget_eq_compileBoundaryRaw_interp], hwf,
-      runtimePublicAnnotation_mk htgt.2⟩
+    exact ⟨rfl, compileBoundaryTarget_eq_compileBoundaryRaw_interp _, hwf, htgt⟩
   | _ => exact absurd hframe nofun
 
 /-! ### Fresh bound-method allocation helpers (Step 6) -/
@@ -530,19 +509,84 @@ private theorem allocated_objRef_any_witness
 
 /-! ### condIsInstance inversion -/
 
+private theorem checkedValueWitness_isInstanceRefinementBase
+    (w : CheckedValueWitness gct cct heap v T)
+    (hfacet : isInstanceRefinementBase? T = some U) :
+    CheckedValueWitness gct cct heap v U := by
+  induction T generalizing U v with
+  | any => simp [isInstanceRefinementBase?] at hfacet
+  | class_ _ | callable _ _ | bottom | negClass _ =>
+      simp [isInstanceRefinementBase?] at hfacet
+      cases hfacet; exact w
+  | union L R ihL ihR =>
+      rcases hL : isInstanceRefinementBase? L with _ | L' <;>
+        rcases hR : isInstanceRefinementBase? R with _ | R' <;>
+        simp [isInstanceRefinementBase?, hL, hR] at hfacet
+      have hbase : isInstanceRefinementBase? (.union L R) = some (.union L' R') := by
+        simp [isInstanceRefinementBase?, hL, hR]
+      cases hfacet
+      cases w with | mk hwf data => cases data with
+        | unionLeft wL =>
+            exact .mk (wellFormedGTy_isInstanceRefinementBase? hbase hwf)
+              (.unionLeft (ihL wL hL))
+        | unionRight wR =>
+            exact .mk (wellFormedGTy_isInstanceRefinementBase? hbase hwf)
+              (.unionRight (ihR wR hR))
+  | intersection L R ihL ihR =>
+      rcases hL : isInstanceRefinementBase? L with _ | L' <;>
+        rcases hR : isInstanceRefinementBase? R with _ | R' <;>
+        simp [isInstanceRefinementBase?, hL, hR] at hfacet
+      · cases hfacet
+        cases w with | mk _ data => cases data with
+          | intersection wL wR => exact ihR wR hR
+      · cases hfacet
+        cases w with | mk _ data => cases data with
+          | intersection wL wR => exact ihL wL hL
+      · have hbase :
+            isInstanceRefinementBase? (.intersection L R) = some (.intersection L' R') := by
+          simp [isInstanceRefinementBase?, hL, hR]
+        cases hfacet
+        cases w with | mk hwf data => cases data with
+          | intersection wL wR =>
+              exact .mk (wellFormedGTy_isInstanceRefinementBase? hbase hwf)
+                (.intersection (ihL wL hL) (ihR wR hR))
+
+private theorem checkedValueWitness_isInstanceRefinementWith
+    (w : CheckedValueWitness gct cct heap v T)
+    (wExtra : CheckedValueWitness gct cct heap v extra) :
+    CheckedValueWitness gct cct heap v (isInstanceRefinementWith T extra) := by
+  unfold isInstanceRefinementWith
+  cases hfacet : isInstanceRefinementBase? T with
+  | none => simpa [hfacet] using wExtra
+  | some U =>
+      let wBase := checkedValueWitness_isInstanceRefinementBase w hfacet
+      exact .mk (.intersection wBase.wf wExtra.wf) (.intersection wBase wExtra)
+
+private theorem checkedValueWitness_isInstanceThenRefinement
+    (w : CheckedValueWitness gct cct heap v T)
+    (wClass : CheckedValueWitness gct cct heap v (.class_ C)) :
+    CheckedValueWitness gct cct heap v (isInstanceThenRefinement T C) :=
+  checkedValueWitness_isInstanceRefinementWith w wClass
+
+private theorem checkedValueWitness_isInstanceElseRefinement
+    (w : CheckedValueWitness gct cct heap v T)
+    (wNeg : CheckedValueWitness gct cct heap v (.negClass C)) :
+    CheckedValueWitness gct cct heap v (isInstanceElseRefinement T C) :=
+  checkedValueWitness_isInstanceRefinementWith w wNeg
+
 /-- Inversion for cond with isInstance scrutinee: extract branch typings.
     Without sub/interIntro, only `cond` and `condIsInstance` match. -/
 private theorem checked_has_type_cond_isInstance_inv
-    (hty : CheckedHasType gct Γ (.cond (.isInstance x C) thenBr elseBr) G) :
+    (hty : CheckedHasType gct structural Γ (.cond (.isInstance x C) thenBr elseBr) G) :
     -- Case 1: ordinary cond — both branches typed under Γ
-    (∃ testTy, CheckedHasType gct Γ (.isInstance x C) testTy ∧
-      CheckedHasType gct Γ thenBr G ∧ CheckedHasType gct Γ elseBr G) ∨
+    (∃ testTy, CheckedHasType gct structural Γ (.isInstance x C) testTy ∧
+      CheckedHasType gct structural Γ thenBr G ∧ CheckedHasType gct structural Γ elseBr G) ∨
     -- Case 2: condIsInstance — branches typed under narrowed envs
     (∃ T cls,
       Γ.lookup x = some T ∧
       findGClass gct C = some cls ∧
-      CheckedHasType gct (Γ.update x (.intersection T (.class_ C))) thenBr G ∧
-      CheckedHasType gct (Γ.update x (.intersection T (.negClass C))) elseBr G) := by
+      CheckedHasType gct structural (Γ.update x (isInstanceThenRefinement T C)) thenBr G ∧
+      CheckedHasType gct structural (Γ.update x (isInstanceElseRefinement T C)) elseBr G) := by
   cases hty with
   | cond htest hthen helse _ =>
     exact .inl ⟨_, htest, hthen, helse⟩
@@ -560,8 +604,8 @@ theorem checked_preservation
     CheckedStateSafe gct cct heap' env' ctrl' cont' expectedType := by
   obtain ⟨Γ, outΓ, G, hwfct, hheap, halign, henv, hctrl, hcont⟩ := hsafe
   -- Heap well-formedness is preserved by all steps
-  have hheap' : CheckedHeapWellFormed gct cct heap' := by
-    exact step_preserves_checkedHeapWellFormed hstep hheap hwfct.raw
+  have hheap' : CheckedHeapWellFormed gct cct heap' :=
+    step_preserves_checkedHeapWellFormed hstep hheap hwfct.raw
   -- Heap monotonicity for non-allocating and allocating steps
   have hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj :=
     fun oid obj hlook => step_preserves_heapMonotonicity hstep hheap.idsBounded hlook
@@ -580,10 +624,6 @@ theorem checked_preservation
   | blameUnwindAwaitArgument =>
     cases hcont with | cons hf hk =>
     cases frameHasType_env_eq_awaitArgument hf ⟨_, _, _, _, rfl⟩
-    exact ⟨_, _, _, hwfct, hheap', halign, henv, .blame, hk⟩
-  | blameUnwindCallValue =>
-    cases hcont with | cons hf hk =>
-    cases frameHasType_env_eq_callValue hf ⟨_, _, _, _, rfl⟩
     exact ⟨_, _, _, hwfct, hheap', halign, henv, .blame, hk⟩
   | blameUnwindCond =>
     cases hcont with | cons hf hk =>
@@ -604,14 +644,9 @@ theorem checked_preservation
   -- ═══════════════════════════════════════════════════════════
   -- ERROR UNWIND CASES: contradiction (no CheckedControlHasType for runtimeError)
   -- ═══════════════════════════════════════════════════════════
-  | errorUnwindAttrAccess => cases hctrl
-  | errorUnwindCallCallee => cases hctrl
-  | errorUnwindAwaitArgument => cases hctrl
-  | errorUnwindCallValue => cases hctrl
-  | errorUnwindCond => cases hctrl
-  | errorUnwindReturnTo => cases hctrl
-  | errorUnwindEnforce => cases hctrl
-  | errorUnwindDynAttrAccess => cases hctrl
+  | errorUnwindAttrAccess | errorUnwindCallCallee | errorUnwindAwaitArgument
+  | errorUnwindCond | errorUnwindReturnTo
+  | errorUnwindEnforce | errorUnwindDynAttrAccess => cases hctrl
   -- ═══════════════════════════════════════════════════════════
   -- FOCUS CASES: decompose compound expression, push frame
   -- ═══════════════════════════════════════════════════════════
@@ -690,38 +725,38 @@ theorem checked_preservation
   | condIsInstanceTrue henvlook hlookObj hfindCls hMro hmem =>
     cases hctrl with | expr hty =>
     rcases checked_has_type_cond_isInstance_inv hty with
-      ⟨_, htest, hthen, _⟩ | ⟨T, cls, hlookΓ, hfindG, hthen, _⟩
+      ⟨_, _, hthen, _⟩ | ⟨_, _, hlookΓ, hfindG, hthen, _⟩
     · exact ⟨_, _, _, hwfct, hheap', halign, henv, .expr hthen,
         .cons (.returnTo henv) hcont⟩
-    · obtain ⟨v, hv, hvty⟩ := henv _ _ hlookΓ
+    · obtain ⟨_, hv, hvty⟩ := henv _ _ hlookΓ
       rw [hv] at henvlook
       cases Option.some.inj henvlook
-      obtain ⟨c', _mro', hfindC, hmroC⟩ := hheap.classesExist _ _ hlookObj
+      obtain ⟨_, _, hfindC, hmroC⟩ := hheap.classesExist _ _ hlookObj
       cases Option.some.inj (hfindC.symm.trans hfindCls)
       cases gComputeMro_determinism hmroC hMro
       let hmroCfull := (hwfct.raw.allMrosExist _ _ hfindG).hmro
-      have wC : CheckedValueWitness gct cct heap _ _ :=
+      have wC : CheckedValueWitness gct cct heap _ (.class_ _) :=
         .mk (.class_ hfindG hmroCfull) (.class_ (.objRef hlookObj hfindCls hMro hmem))
-      have wInter := CheckedValueWitness.mk (.intersection hvty.wf wC.wf) (.intersection hvty wC)
+      have wRef := checkedValueWitness_isInstanceThenRefinement hvty wC
       exact ⟨_, _, _, hwfct, hheap', halign,
-        checkedEnvHasType_updateWitness henv hlookΓ hv wInter, .expr hthen,
+        checkedEnvHasType_updateWitness henv hlookΓ hv wRef, .expr hthen,
         .cons (.returnTo henv) hcont⟩
   | condIsInstanceFalse henvlook hlookObj hfindCls hMro hnotmem =>
     cases hctrl with | expr hty =>
     rcases checked_has_type_cond_isInstance_inv hty with
-      ⟨_, htest, _, helse⟩ | ⟨T, cls, hlookΓ, hfindG, _, helse⟩
+      ⟨_, _, _, helse⟩ | ⟨_, _, hlookΓ, hfindG, _, helse⟩
     · exact ⟨_, _, _, hwfct, hheap', halign, henv, .expr helse,
         .cons (.returnTo henv) hcont⟩
-    · obtain ⟨v, hv, hvty⟩ := henv _ _ hlookΓ
+    · obtain ⟨_, hv, hvty⟩ := henv _ _ hlookΓ
       rw [hv] at henvlook
       cases Option.some.inj henvlook
       let hmroC := (hwfct.raw.allMrosExist _ _ hfindG).hmro
-      have wNeg : CheckedValueWitness gct cct heap _ _ :=
+      have wNeg : CheckedValueWitness gct cct heap _ (.negClass _) :=
         .mk (.negClass hfindG hmroC) (.negClass (.objRef hlookObj)
-          (fun _ => .negClassObjRefOk hlookObj hfindCls hMro hnotmem))
-      have wInter := CheckedValueWitness.mk (.intersection hvty.wf wNeg.wf) (.intersection hvty wNeg)
+          (.negClassObjRefOk hlookObj hfindCls hMro hnotmem))
+      have wRef := checkedValueWitness_isInstanceElseRefinement hvty wNeg
       exact ⟨_, _, _, hwfct, hheap', halign,
-        checkedEnvHasType_updateWitness henv hlookΓ hv wInter, .expr helse,
+        checkedEnvHasType_updateWitness henv hlookΓ hv wRef, .expr helse,
         .cons (.returnTo henv) hcont⟩
   | condIsInstanceVarNotFound henvlook =>
     cases hctrl with | expr hty => exact absurd henvlook (condIsInstance_var_exists hty rfl henv)
@@ -817,7 +852,7 @@ theorem checked_preservation
     cases checkedValueWitness_callable_view w with
     | objRefBoundMethod hlook' hrecv hmro_method =>
       rw [hlookup] at hlook'; cases Option.some.inj hlook'
-      have hmethodTarget := checkedMethodInReceiverMro_runtimePublic halign hmro_method
+      have hmethodTarget := checkedMethodInReceiverMro_checkedTarget halign hmro_method
       have hmethodWf := checkedMethodInReceiverMro_wellFormed halign hmro_method
       exact ⟨_, _, _, hwfct, hheap', halign, henv,
         .expr harg,
@@ -833,31 +868,6 @@ theorem checked_preservation
       rw [hlookup] at hlook'
       exact absurd (Option.some.inj hlook') nofun
   -- ═══════════════════════════════════════════════════════════
-  -- RETURN CASES: call value
-  -- ═══════════════════════════════════════════════════════════
-  | returnCallValueBound hlookup =>
-    cases hctrl with | val w =>
-    cases hcont with | cons hf hk =>
-    cases hf with | callValue warg _ htReturn _ hwfReturn =>
-    cases checkedValueWitness_callable_view w with
-    | objRefBoundMethod hlook' hrecv hmro_method =>
-      rw [hlookup] at hlook'; cases Option.some.inj hlook'
-      have hmethodTarget := checkedMethodInReceiverMro_runtimePublic halign hmro_method
-      have hmethodWf := checkedMethodInReceiverMro_wellFormed halign hmro_method
-      exact ⟨_, _, _, hwfct, hheap', halign, henv,
-        .val warg,
-        .cons (.awaitArgument hrecv hmro_method
-          hmethodTarget.1 hmethodTarget.2 htReturn
-          hmethodWf.1 hmethodWf.2 hwfReturn) hk⟩
-  | returnCallValueNotCallable hlookup =>
-    cases hctrl with | val w =>
-    cases hcont with | cons hf hk =>
-    cases hf with | callValue _ _ _ _ _ =>
-    cases checkedValueWitness_callable_view w with
-    | objRefBoundMethod hlook' _ _ =>
-      rw [hlookup] at hlook'
-      exact absurd (Option.some.inj hlook') nofun
-  -- ═══════════════════════════════════════════════════════════
   -- RETURN CASES: await argument (bare bound method)
   -- ═══════════════════════════════════════════════════════════
   | returnAwaitArgumentOk henf =>
@@ -865,10 +875,9 @@ theorem checked_preservation
     cases hcont with | cons hf hk =>
     cases hf with
     | awaitArgument hrecv hmro_method htParam htMethodReturn htCallReturn hwfParam hwfMethodReturn hwfCallReturn =>
-    have hcontracts := checkedMethodInReceiverMro_contracts halign hmro_method
     have wArgEnforced := enforce_ok_has_witness henf (checkedValueWitness_toShape w)
-        hheap hwfct halign _ hcontracts.1
-        (runtimePublicAnnotation_mk (runtimePublicCheckedTarget_checked htParam))
+        hheap hwfct halign _ (compileBoundaryTarget_eq_compileBoundaryRaw_interp _)
+        htParam
         hwfParam
     obtain ⟨recvCls, recvMro, hfindRecv, hMroRecv, hfindCm⟩ := hmro_method
     obtain ⟨dname, dc, hdname_mem, hdc, hcm_in_dc⟩ := findCheckedMethodInMro_provenance hfindCm

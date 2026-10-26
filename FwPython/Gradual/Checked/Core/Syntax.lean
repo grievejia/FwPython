@@ -1,136 +1,66 @@
 import FwPython.Gradual.MRO.Lookup
 import FwPython.Gradual.Contracts
-import FwPython.Gradual.Statics
+import FwPython.Gradual.SourceObligation
 import FwPython.Gradual.TypeSystem.CheckedTargetSyntax
-import FwPython.Builtins
 
 /-! # Checked Runtime Vocabulary
 
 Defines the checked target language and runtime objects for the gradual system.
 The checked language extends the gradual source with explicit enforcement nodes
-(`enforce` against `BoundaryContract`). Method calls carry their call-site
-return boundary labels explicitly so the runtime can enforce method returns
-against both the method contract and the call-site contract. -/
+(`enforce` against `BoundaryContract`). Blame-capable checked operations carry
+the source obligation that the checked machine reports when the operation
+rejects a value. -/
 
 /-! ## Checked expressions -/
 
 /-- The checked target language extends the gradual source expressions with:
-    - `enforce e target labels`: runtime type enforcement against the compiled
-      contract image of `target`; blames `labels.direct` if `e` does not conform
-    - `dynAttrAccess e attrName ℓ`: dynamic attribute access; blames `ℓ` if
-      the attribute is missing, rather than producing a raw runtime error -/
+    - `enforce e target obligation`: runtime type enforcement against the
+      compiled contract image of `target`; boundary blame reports `obligation`
+    - `dynAttrAccess e attrName obligation`: dynamic attribute access; missing
+      attributes report `obligation` instead of producing a raw runtime error
+    - `call callee arg paramTy returnTy returnObligation`: ordinary call with
+      explicit argument and return targets; the caller-side return boundary
+      reports `returnObligation` -/
 inductive CheckedExpr : Type where
   | var : Identifier → CheckedExpr
   | new : Identifier → CheckedExpr
   | attrAccess : CheckedExpr → Identifier → CheckedExpr
   | call : CheckedExpr → CheckedExpr →
       (paramTy : CheckedTarget) → (returnTy : CheckedTarget) →
-      BoundaryLabels (compileBoundaryTarget returnTy) → CheckedExpr
+      SourceObligation → CheckedExpr
   | constNone : CheckedExpr
   | constTrue : CheckedExpr
   | constFalse : CheckedExpr
   | cond : CheckedExpr → CheckedExpr → CheckedExpr → CheckedExpr
   | isInstance : Identifier → Identifier → CheckedExpr
   | enforce : (e : CheckedExpr) → (target : CheckedTarget) →
-      BoundaryLabels (compileBoundaryTarget target) → CheckedExpr
-  | dynAttrAccess : CheckedExpr → Identifier → Label → CheckedExpr
+      SourceObligation → CheckedExpr
+  | dynAttrAccess : CheckedExpr → Identifier → SourceObligation → CheckedExpr
   deriving DecidableEq, Repr
-
-/-- Child positions inside checked expressions, used for provenance paths. -/
-inductive ExprChild : Type where
-  | attrBase
-  | callCallee
-  | callArg
-  | condTest
-  | condThen
-  | condElse
-  | enforceBody
-  | dynAttrBase
-  deriving DecidableEq, Repr
-
-/-- Paths from the expression root to a descendant node. -/
-abbrev ExprPath := List ExprChild
-
-/-- Read the subexpression at a path. Returns the root expression at `[]`. -/
-def CheckedExpr.nodeAt : CheckedExpr → ExprPath → Option CheckedExpr
-  | e, [] => some e
-  | .attrAccess base _, .attrBase :: path => base.nodeAt path
-  | .call callee _ _ _ _, .callCallee :: path => callee.nodeAt path
-  | .call _ arg _ _ _, .callArg :: path => arg.nodeAt path
-  | .cond test _ _, .condTest :: path => test.nodeAt path
-  | .cond _ thenBr _, .condThen :: path => thenBr.nodeAt path
-  | .cond _ _ elseBr, .condElse :: path => elseBr.nodeAt path
-  | .enforce e _ _, .enforceBody :: path => e.nodeAt path
-  | .dynAttrAccess e _ _, .dynAttrBase :: path => e.nodeAt path
-  | _, _ => none
-
-theorem CheckedExpr.nodeAt_append
-    {e e' : CheckedExpr}
-    (h : e.nodeAt p = some e') :
-    e.nodeAt (p ++ q) = e'.nodeAt q := by
-  induction p generalizing e with
-  | nil =>
-      simp [CheckedExpr.nodeAt] at h ⊢
-      cases h
-      rfl
-  | cons child p ih =>
-      cases e <;> cases child <;> simp [CheckedExpr.nodeAt] at h ⊢ <;> exact ih h
-
-theorem checkedExpr_call_inversion
-    {callee₁ callee₂ arg₁ arg₂ : CheckedExpr}
-    {paramTy₁ paramTy₂ returnTy₁ returnTy₂ : CheckedTarget}
-    {returnLabels₁ : BoundaryLabels (compileBoundaryTarget returnTy₁)}
-    {returnLabels₂ : BoundaryLabels (compileBoundaryTarget returnTy₂)}
-    (h :
-      CheckedExpr.call callee₁ arg₁ paramTy₁ returnTy₁ returnLabels₁ =
-        CheckedExpr.call callee₂ arg₂ paramTy₂ returnTy₂ returnLabels₂) :
-    ∃ hret : returnTy₁ = returnTy₂,
-      callee₁ = callee₂ ∧
-      arg₁ = arg₂ ∧
-      paramTy₁ = paramTy₂ ∧
-      hret ▸ returnLabels₁ = returnLabels₂ := by
-  cases h
-  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 /-! ## Checked classes -/
 
-/-- A checked method stores both the original gradual type annotations and the
-    explicit checked targets with blame labels indexed by their compiled
-    contract images. -/
+/-- A checked runtime method stores lookup names, machine-facing targets,
+source obligations for method boundaries, and the checked expression executed
+as the method body. -/
 structure CheckedMethod where
+  /-- The method name used for checked method lookup. -/
   name : Identifier
+  /-- The local variable name bound to the receiver object when checking the method body. -/
   receiverParam : Identifier
+  /-- The local variable name bound to the explicit argument. -/
   param : Identifier
+  /-- The machine-facing `CheckedTarget` annotation for the explicit argument. -/
   paramTy : CheckedTarget
+  /-- The machine-facing `CheckedTarget` annotation for the return value. -/
   returnTy : CheckedTarget
-  parameterLabels : BoundaryLabels (compileBoundaryTarget paramTy)
-  returnLabels : BoundaryLabels (compileBoundaryTarget returnTy)
+  /-- Source obligation reported when the method's explicit-argument boundary rejects an argument. -/
+  parameterObligation : SourceObligation
+  /-- Source obligation reported when the method's declared return boundary rejects the method body result. -/
+  returnObligation : SourceObligation
+  /-- The checked expression executed as the method body. -/
   body : CheckedExpr
   deriving DecidableEq, Repr
-
-namespace CheckedMethod
-
-/-- The machine-facing parameter contract is recovered from the stored checked
-target annotation on demand rather than stored redundantly. -/
-def parameterContract (m : CheckedMethod) : BoundaryContract :=
-  compileBoundaryTarget m.paramTy
-
-/-- The machine-facing return contract is recovered from the stored checked
-target annotation on demand rather than stored redundantly. -/
-def returnContract (m : CheckedMethod) : BoundaryContract :=
-  compileBoundaryTarget m.returnTy
-
-@[simp] theorem parameterContract_eq
-    (m : CheckedMethod) :
-    m.parameterContract = compileBoundaryTarget m.paramTy :=
-  rfl
-
-@[simp] theorem returnContract_eq
-    (m : CheckedMethod) :
-    m.returnContract = compileBoundaryTarget m.returnTy :=
-  rfl
-
-end CheckedMethod
 
 /-- A checked class has the same structure as a gradual class but with checked methods. -/
 structure CheckedClass where
@@ -165,36 +95,6 @@ abbrev findCheckedMethodInMro (cct : CheckedClassTable) (mro : List Identifier)
   findMemberInHierarchy findCheckedClass CheckedClass.methods CheckedMethod.name cct mro mname
 
 /-! ### Checked method lookup lemmas -/
-
-theorem findCheckedMethodInList_mem
-    (h : findCheckedMethodInList ms mname = some m) : m ∈ ms :=
-  findByName_mem h
-
-theorem findCheckedMethodInList_name
-    (h : findCheckedMethodInList ms mname = some m) : m.name = mname := by
-  exact findByName_name h
-
-/-- Within one checked class, distinct method-list members cannot share a name. -/
-theorem findCheckedMethodInList_unique
-    {ms : List CheckedMethod} {m₁ m₂ : CheckedMethod}
-    (hnodup : List.Nodup (ms.map CheckedMethod.name))
-    (hmem₁ : m₁ ∈ ms)
-    (hmem₂ : m₂ ∈ ms)
-    (hname : m₁.name = m₂.name) :
-    m₁ = m₂ := by
-  induction ms with
-  | nil => cases hmem₁
-  | cons m ms ih =>
-      rcases List.nodup_cons.mp hnodup with ⟨hnotmem, hnodup⟩
-      cases hmem₁ with
-      | head =>
-          cases hmem₂ with
-          | head => rfl
-          | tail _ hmem₂ => exact absurd (List.mem_map.mpr ⟨m₂, hmem₂, hname.symm⟩) hnotmem
-      | tail _ hmem₁ =>
-          cases hmem₂ with
-          | head => exact absurd (List.mem_map.mpr ⟨m₁, hmem₁, hname⟩) hnotmem
-          | tail _ hmem₂ => apply ih <;> assumption
 
 /-- If checked MRO lookup finds a method, its name matches the query. -/
 theorem findCheckedMethodInMro_name

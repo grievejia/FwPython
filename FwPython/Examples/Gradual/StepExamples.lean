@@ -1,20 +1,18 @@
-import FwPython.Gradual.Checked.Determinism
+import FwPython.Gradual
 
 /-! # Checked Step Regression Examples
 
 Concrete derivations exercising representative step rules of the checked
-small-step machine: focus rules, atomic evaluation, return rules for
-attribute access, call dispatch, conditionals, enforcement, and blame
-propagation. After the shallow-callable refactor, all callable values are
-plain `objRef`s into bound-method heap objects — there is no wrapper layer
-on top, so call dispatch goes directly through `awaitArgument`. -/
+small-step machine.
+-/
 
 open Checked
 
 variable {ct : GClassTable} {cct : CheckedClassTable} {heap heap' : CheckedHeap} {env : CheckedEnv}
 variable {k : Checked.Continuation}
+variable {obligation returnObligation : SourceObligation}
 
-/-! ## Focus rules: peeling the outer constructor -/
+/-! ## Focus rules -/
 
 /-- Attribute-access focus pushes an `attrAccess` frame and recurses on the base. -/
 example :
@@ -28,18 +26,18 @@ example :
 example :
     Step ct cct
       { heap, env,
-        control := .expr (.call callee arg paramTy returnTy returnLabels),
+        control := .expr (.call callee arg paramTy returnTy returnObligation),
         continuation := k }
       { heap, env, control := .expr callee,
-        continuation := .callCallee arg paramTy returnTy returnLabels :: k } :=
+        continuation := .callCallee arg paramTy returnTy returnObligation :: k } :=
   .focusCall
 
 /-- Enforce focus pushes an `enforce` frame and recurses on the body. -/
 example :
     Step ct cct
-      { heap, env, control := .expr (.enforce e c labels), continuation := k }
+      { heap, env, control := .expr (.enforce e c obligation), continuation := k }
       { heap, env, control := .expr e,
-        continuation := .enforce c labels :: k } :=
+        continuation := .enforce c obligation :: k } :=
   .focusEnforce
 
 /-! ## Atomic evaluation -/
@@ -59,36 +57,9 @@ example :
       { heap, env, control := .val (.objRef noneOid), continuation := k } :=
   .constNone
 
-/-- `isInstance` returns `true` when the variable's class MRO contains the target. -/
-example
-    (henv : env.lookup varName = some (.objRef objOid))
-    (hlook : heap.lookup objOid = some obj)
-    (hfind : findGClass ct obj.className = some c)
-    (hmro : GComputeMro ct c mro)
-    (hmem : targetClass ∈ mro) :
-    Step ct cct
-      { heap, env, control := .expr (.isInstance varName targetClass), continuation := k }
-      { heap, env, control := .val (.objRef trueOid), continuation := k } :=
-  .isInstanceTrue henv hlook hfind hmro hmem
+/-! ## Dynamic attribute access -/
 
-/-! ## Attribute access dispatch -/
-
-/-- Attribute access on an objRef allocates a bound-method object and returns
-    its OID. -/
-example
-    (hlook : heap.lookup objOid = some obj)
-    (hfind : findGClass ct obj.className = some c)
-    (hmro : GComputeMro ct c mro)
-    (hmethod : findCheckedMethodInMro cct mro attrName = some cm)
-    (halloc : heap.alloc ⟨boundMethodClass, .boundMethod objOid cm⟩ =
-      (bmOid, heap')) :
-    Step ct cct
-      { heap, env, control := .val (.objRef objOid),
-        continuation := .attrAccess attrName :: k }
-      { heap := heap', env, control := .val (.objRef bmOid), continuation := k } :=
-  .returnAttrAccess hlook hfind hmro hmethod halloc
-
-/-- Dynamic attribute access on a missing attribute blames its label. -/
+/-- Dynamic attribute access on a missing attribute reports its stored obligation. -/
 example
     (hlook : heap.lookup objOid = some obj)
     (hfind : findGClass ct obj.className = some c)
@@ -96,98 +67,98 @@ example
     (hmethod : findCheckedMethodInMro cct mro attrName = none) :
     Step ct cct
       { heap, env, control := .val (.objRef objOid),
-        continuation := .dynAttrAccess attrName ℓ :: k }
-      { heap, env, control := .blame ℓ, continuation := k } :=
+        continuation := .dynAttrAccess attrName obligation :: k }
+      { heap, env,
+        control := .blame
+          { obligation := obligation,
+            cause := .missingAttribute (.objRef objOid) attrName },
+        continuation := k } :=
   .returnDynAttrAccessNotFound hlook hfind hmro hmethod
 
 /-! ## Call dispatch on a bound-method objRef -/
 
-/-- The callee value, once a bound-method objRef, transitions to the argument
-    expression with an `awaitArgument` frame carrying the resolved method. -/
+/-- The callee value, once a bound-method objRef, transitions to argument evaluation. -/
 example
     (hlook : heap.lookup calleeOid = some ⟨boundMethodClass, .boundMethod recvOid m⟩) :
     Step ct cct
       { heap, env, control := .val (.objRef calleeOid),
-        continuation := .callCallee arg paramTy returnTy returnLabels :: k }
+        continuation := .callCallee arg paramTy returnTy returnObligation :: k }
       { heap, env, control := .expr arg,
-        continuation := .awaitArgument recvOid m returnTy returnLabels :: k } :=
+        continuation := .awaitArgument recvOid m returnTy returnObligation :: k } :=
   .returnCallCalleeBound hlook
 
-/-- Calling an ordinary (non-bound-method) object yields a runtime error. -/
+/-- Successful argument enforcement enters the method body with distinct return obligations. -/
 example
-    (hlook : heap.lookup calleeOid = some ⟨cname, .ordinary⟩) :
-    Step ct cct
-      { heap, env, control := .val (.objRef calleeOid),
-        continuation := .callCallee arg paramTy returnTy returnLabels :: k }
-      { heap, env, control := .runtimeError "Cannot call non-invokable value",
-        continuation := k } :=
-  .returnCallCalleeNotCallable hlook
-
-/-- Successful argument enforcement enters the method body with the receiver
-    and parameter bound, stacking the return enforcements and the caller-env
-    return frame. -/
-example
-    (henf : EnforceValue ct heap argVal m.parameterContract m.parameterLabels (.ok argVal')) :
+    (henf : EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) .ok) :
     Step ct cct
       { heap, env, control := .val argVal,
-        continuation := .awaitArgument recvOid m returnTy returnLabels :: k }
+        continuation := .awaitArgument recvOid m returnTy returnObligation :: k }
       { heap,
-        env := [(m.param, argVal'), (m.receiverParam, .objRef recvOid)],
+        env := [(m.param, argVal), (m.receiverParam, .objRef recvOid)],
         control := .expr m.body,
         continuation :=
-          .enforce m.returnTy m.returnLabels ::
-            .enforce returnTy returnLabels ::
+          .enforce m.returnTy m.returnObligation ::
+            .enforce returnTy returnObligation ::
             .returnTo env :: k } :=
   .returnAwaitArgumentOk henf
 
-/-! ## Conditionals -/
-
-/-- A `true` condition selects the `then` branch. -/
-example :
-    Step ct cct
-      { heap, env, control := .val (.objRef trueOid),
-        continuation := .cond thenBr elseBr :: k }
-      { heap, env, control := .expr thenBr, continuation := k } :=
-  .returnCondTrue
-
-/-- A non-bool condition produces a runtime error. -/
+/-- Failing method-parameter enforcement reports the resolved method's parameter obligation. -/
 example
-    (htrue : condOid ≠ trueOid)
-    (hfalse : condOid ≠ falseOid) :
+    (henf : EnforceValue ct heap argVal (compileBoundaryTarget m.paramTy) .blame) :
     Step ct cct
-      { heap, env, control := .val (.objRef condOid),
-        continuation := .cond thenBr elseBr :: k }
-      { heap, env, control := .runtimeError "Condition must evaluate to TRUE or FALSE",
+      { heap, env, control := .val argVal,
+        continuation := .awaitArgument recvOid m returnTy returnObligation :: k }
+      { heap, env,
+        control := .blame
+          { obligation := m.parameterObligation,
+            cause := .methodParameter argVal m },
         continuation := k } :=
-  .returnCondNotBool htrue hfalse
+  .returnAwaitArgumentBlame henf
 
 /-! ## Enforcement frames -/
 
-/-- A successful enforcement on a value just unwraps the frame. -/
+/-- A successful enforcement returns the original value. -/
 example
-    (henf : EnforceValue ct heap v (compileBoundaryTarget c) labels (.ok v')) :
+    (henf : EnforceValue ct heap v (compileBoundaryTarget c) .ok) :
     Step ct cct
-      { heap, env, control := .val v, continuation := .enforce c labels :: k }
-      { heap, env, control := .val v', continuation := k } :=
+      { heap, env, control := .val v, continuation := .enforce c obligation :: k }
+      { heap, env, control := .val v, continuation := k } :=
   .returnEnforceOk henf
 
-/-- A failing enforcement turns the value into a blame on the frame's direct label. -/
+/-- A failing enforcement reports the enforce frame's obligation. -/
 example
-    (henf : EnforceValue ct heap v (compileBoundaryTarget c) labels (.blame labels.direct)) :
+    (henf : EnforceValue ct heap v (compileBoundaryTarget c) .blame) :
     Step ct cct
-      { heap, env, control := .val v, continuation := .enforce c labels :: k }
-      { heap, env, control := .blame labels.direct, continuation := k } :=
+      { heap, env, control := .val v, continuation := .enforce c obligation :: k }
+      { heap, env,
+        control := .blame
+          { obligation := obligation,
+            cause := .boundary v c },
+        continuation := k } :=
   .returnEnforceBlame henf
 
 /-! ## Blame propagation -/
 
 /-- Blame unwinds through an `attrAccess` frame unchanged. -/
-example :
+example
+    (info : BlameInfo) :
     Step ct cct
-      { heap, env, control := .blame ℓ,
+      { heap, env, control := .blame info,
         continuation := .attrAccess attrName :: k }
-      { heap, env, control := .blame ℓ, continuation := k } :=
+      { heap, env, control := .blame info, continuation := k } :=
   .blameUnwindAttrAccess
+
+/-- A raised blame payload is preserved until final-result extraction. -/
+example
+    (info : BlameInfo) :
+    Checked.Steps ct cct
+      { heap, env, control := .blame info,
+        continuation := .attrAccess attrName :: [] }
+      { heap, env, control := .blame info, continuation := [] } ∧
+    Checked.finalResult?
+      { heap, env, control := .blame info, continuation := [] } =
+      some (heap, CheckedResult.blame info) :=
+  ⟨.step .blameUnwindAttrAccess .refl, rfl⟩
 
 /-! ## Determinism still holds -/
 

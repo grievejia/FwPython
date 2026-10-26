@@ -1,6 +1,5 @@
 import FwPython.Gradual.MRO.Compute
 import FwPython.Gradual.Contracts
-import FwPython.Gradual.TypeSystem.CheckedTargetPrecision
 
 /-! ## Admissible target fragment
 
@@ -61,72 +60,6 @@ def BMCompatibleFormula (gct : GClassTable) (F : GTy) : Prop :=
     GComputeMro gct bmcls bmmro →
     FormulaHoldsForMro bmmro F
 
-private inductive LocalTypePrecision : GTy → GTy → Prop where
-  | refl :
-      LocalTypePrecision G G
-  | toAny :
-      LocalTypePrecision G .any
-  | callable :
-      LocalTypePrecision P₁ P₂ →
-      LocalTypePrecision R₁ R₂ →
-      LocalTypePrecision (.callable P₁ R₁) (.callable P₂ R₂)
-  | union :
-      LocalTypePrecision G₁ G₂ →
-      LocalTypePrecision H₁ H₂ →
-      LocalTypePrecision (.union G₁ H₁) (.union G₂ H₂)
-  | intersection :
-      LocalTypePrecision G₁ G₂ →
-      LocalTypePrecision H₁ H₂ →
-      LocalTypePrecision (.intersection G₁ H₁) (.intersection G₂ H₂)
-
-private theorem localTypePrecision_of_checkedTargetPrecision
-    (hprec : CheckedTargetPrecision T₁ T₂) :
-    LocalTypePrecision (interpTarget T₁) (interpTarget T₂) := by
-  induction hprec with
-  | refl =>
-      exact .refl
-  | toAny =>
-      exact .toAny
-  | callable _ _ ihParam ihReturn =>
-      exact .callable ihParam ihReturn
-  | union _ _ ihLeft ihRight =>
-      exact .union ihLeft ihRight
-  | intersection _ _ ihLeft ihRight =>
-      exact .intersection ihLeft ihRight
-
-/-! ### Formula transport through structural precision -/
-
-private theorem formulaGTy_precision
-    (hprec : LocalTypePrecision F₁ F₂)
-    (hformula : FormulaGTy F₁) :
-    FormulaGTy F₂ := by
-  induction hprec with
-  | refl => exact hformula
-  | toAny => exact .any
-  | callable => cases hformula
-  | union _ _ ihF ihG =>
-    let .union hF hG := hformula
-    exact .union (ihF hF) (ihG hG)
-  | intersection _ _ ihF ihG =>
-    let .intersection hF hG := hformula
-    exact .intersection (ihF hF) (ihG hG)
-
-private theorem formulaHoldsForMro_precision
-    (hprec : LocalTypePrecision F₁ F₂)
-    (hformula : FormulaGTy F₁)
-    (hh : FormulaHoldsForMro mro F₁) :
-    FormulaHoldsForMro mro F₂ := by
-  induction hprec with
-  | refl => exact hh
-  | toAny => exact trivial
-  | callable => cases hformula
-  | union _ _ ihF ihG =>
-    let .union hF hG := hformula
-    exact hh.imp (ihF hF) (ihG hG)
-  | intersection _ _ ihF ihG =>
-    let .intersection hF hG := hformula
-    exact ⟨ihF hF hh.1, ihG hG hh.2⟩
-
 /-- The admissible checked target type fragment. Machine-facing target
     types must lie in this fragment so that preservation can use exact
     enforcement evidence without generic witness subsumption.
@@ -167,71 +100,11 @@ inductive CheckedTargetTy (gct : GClassTable) : GTy → Prop where
       CheckedTargetTy gct R →
       CheckedTargetTy gct (.intersection F (.callable P R))
 
-/-! ### Admissible fragment closure lemmas -/
+/-! ### Checking the target restrictions -/
 
 /-- BM-compatible formulas are formulas. -/
 theorem BMCompatibleFormula.toFormula (h : BMCompatibleFormula gct F) :
     FormulaGTy F := h.1
-
-/-- BM-compatible formulas are admissible target types. -/
-theorem BMCompatibleFormula.toCheckedTargetTy (h : BMCompatibleFormula gct F) :
-    CheckedTargetTy gct F := .classFormula h.toFormula
-
-/-- A runtime/public checked target is a normalized checked target whose
-interpreted source type lies in the admissible fragment. -/
-def RuntimePublicCheckedTarget (gct : GClassTable) (T : CheckedTarget) : Prop :=
-  RuntimePublicCheckedTargetShape T ∧ CheckedTargetTy gct (interpTarget T)
-
-theorem runtimePublicCheckedTarget_shape
-    (h : RuntimePublicCheckedTarget gct T) :
-    RuntimePublicCheckedTargetShape T :=
-  h.1
-
-theorem runtimePublicCheckedTarget_checked
-    (h : RuntimePublicCheckedTarget gct T) :
-    CheckedTargetTy gct (interpTarget T) :=
-  h.2
-
-theorem runtimePublicCheckedTarget_mk
-    (hshape : RuntimePublicCheckedTargetShape T)
-    (hchecked : CheckedTargetTy gct (interpTarget T)) :
-    RuntimePublicCheckedTarget gct T :=
-  ⟨hshape, hchecked⟩
-
-theorem runtimePublicCheckedTarget_normalize
-    (hchecked : CheckedTargetTy gct (interpTarget T)) :
-    RuntimePublicCheckedTarget gct (coreNormalizeCheckedTarget T) := by
-  refine ⟨runtimePublicCheckedTargetShape_normalized T, ?_⟩
-  simpa using hchecked
-
-/-- Source-level admissibility phrased through the explicit checked-target
-image of `G`. -/
-def RuntimePublicAnnotation (gct : GClassTable) (G : GTy) : Prop :=
-  RuntimePublicCheckedTarget gct (checkedTargetOfGTy G)
-
-theorem runtimePublicAnnotation_shape
-    (h : RuntimePublicAnnotation gct G) :
-    RuntimePublicCheckedTargetShape (checkedTargetOfGTy G) :=
-  h.1
-
-theorem runtimePublicAnnotation_checked
-    (h : RuntimePublicAnnotation gct G) :
-    CheckedTargetTy gct G :=
-  by simpa using h.2
-
-theorem runtimePublicAnnotation_mk
-    (hchecked : CheckedTargetTy gct G) :
-    RuntimePublicAnnotation gct G :=
-  ⟨runtimePublicCheckedTargetShape_all _, by simpa using hchecked⟩
-
-theorem runtimePublicAnnotation_iff_checkedTargetTy
-    (gct : GClassTable) (G : GTy) :
-    RuntimePublicAnnotation gct G ↔ CheckedTargetTy gct G := by
-  constructor
-  · intro h
-    simpa using h.2
-  · intro h
-    exact runtimePublicAnnotation_mk h
 
 theorem bmCompatibleFormula_iff_computeGMro
     (gct : GClassTable) (F : GTy) :
@@ -268,14 +141,6 @@ theorem bmCompatibleFormula_iff_computeGMro
         have hmroEq : bmmro = bmmro' :=
           gComputeMro_determinism hmro hmro'
         simpa [hmroEq] using h.2
-
-private theorem bmCompatibleFormula_precision
-    (hprec : LocalTypePrecision F₁ F₂)
-    (hbm : BMCompatibleFormula gct F₁) :
-    BMCompatibleFormula gct F₂ := by
-  refine ⟨formulaGTy_precision hprec hbm.1, ?_⟩
-  intro bmcls bmmro hfind hmro
-  exact formulaHoldsForMro_precision hprec hbm.1 (hbm.2 bmcls bmmro hfind hmro)
 
 /-- Decidability of MRO satisfaction for formula types. -/
 instance formulaHoldsForMro_decidable (mro : List Identifier) (F : GTy) :
@@ -399,184 +264,3 @@ private def checkedTargetTy_decide (gct : GClassTable) : (G : GTy) → Decidable
 
 instance : Decidable (CheckedTargetTy gct G) :=
   checkedTargetTy_decide gct G
-
-instance runtimePublicCheckedTarget_decidable
-    (gct : GClassTable) (T : CheckedTarget) :
-    Decidable (RuntimePublicCheckedTarget gct T) := by
-  dsimp [RuntimePublicCheckedTarget]
-  infer_instance
-
-instance runtimePublicAnnotation_decidable
-    (gct : GClassTable) (G : GTy) :
-    Decidable (RuntimePublicAnnotation gct G) := by
-  dsimp [RuntimePublicAnnotation]
-  infer_instance
-
-private theorem checkedTargetTy_precision
-    (hprec : LocalTypePrecision G₁ G₂)
-    (h : CheckedTargetTy gct G₁) :
-    CheckedTargetTy gct G₂ := by
-  induction h generalizing G₂ with
-  | classFormula hformula =>
-      exact .classFormula (formulaGTy_precision hprec hformula)
-  | callable hP hR ihP ihR =>
-      cases hprec with
-      | refl =>
-          exact .callable hP hR
-      | toAny =>
-          exact .classFormula .any
-      | callable hprecP hprecR =>
-          exact .callable (ihP hprecP) (ihR hprecR)
-  | union hG hH ihG ihH =>
-      cases hprec with
-      | refl =>
-          exact .union hG hH
-      | toAny =>
-          exact .classFormula .any
-      | union hprecG hprecH =>
-          exact .union (ihG hprecG) (ihH hprecH)
-  | interCallableLeft hP hR hbm ihP ihR =>
-      cases hprec with
-      | refl =>
-          exact .interCallableLeft hP hR hbm
-      | toAny =>
-          exact .classFormula .any
-      | intersection hprecCall hprecF =>
-          cases hprecCall with
-          | refl =>
-              exact .interCallableLeft hP hR
-                (bmCompatibleFormula_precision hprecF hbm)
-          | toAny =>
-              exact .classFormula
-                (.intersection .any (formulaGTy_precision hprecF hbm.1))
-          | callable hprecP hprecR =>
-              exact .interCallableLeft
-                (ihP hprecP)
-                (ihR hprecR)
-                (bmCompatibleFormula_precision hprecF hbm)
-  | interCallableRight hbm hP hR ihP ihR =>
-      cases hprec with
-      | refl =>
-          exact .interCallableRight hbm hP hR
-      | toAny =>
-          exact .classFormula .any
-      | intersection hprecF hprecCall =>
-          cases hprecCall with
-          | refl =>
-              exact .interCallableRight
-                (bmCompatibleFormula_precision hprecF hbm)
-                hP hR
-          | toAny =>
-              exact .classFormula
-                (.intersection (formulaGTy_precision hprecF hbm.1) .any)
-          | callable hprecP hprecR =>
-              exact .interCallableRight
-                (bmCompatibleFormula_precision hprecF hbm)
-                (ihP hprecP)
-                (ihR hprecR)
-
-theorem formulaGTy_annotationPrecision
-    (hprec : AnnotationTargetPrecision F₁ F₂)
-    (hformula : FormulaGTy F₁) :
-    FormulaGTy F₂ := by
-  exact formulaGTy_precision
-    (by
-      simpa [AnnotationTargetPrecision] using
-        localTypePrecision_of_checkedTargetPrecision hprec)
-    hformula
-
-theorem formulaHoldsForMro_annotationPrecision
-    (hprec : AnnotationTargetPrecision F₁ F₂)
-    (hformula : FormulaGTy F₁)
-    (hh : FormulaHoldsForMro mro F₁) :
-    FormulaHoldsForMro mro F₂ := by
-  exact formulaHoldsForMro_precision
-    (by
-      simpa [AnnotationTargetPrecision] using
-        localTypePrecision_of_checkedTargetPrecision hprec)
-    hformula
-    hh
-
-theorem bmCompatibleFormula_annotationPrecision
-    (hprec : AnnotationTargetPrecision F₁ F₂)
-    (hbm : BMCompatibleFormula gct F₁) :
-    BMCompatibleFormula gct F₂ := by
-  exact bmCompatibleFormula_precision
-    (by
-      simpa [AnnotationTargetPrecision] using
-        localTypePrecision_of_checkedTargetPrecision hprec)
-    hbm
-
-theorem checkedTargetTy_annotationPrecision
-    (hprec : AnnotationTargetPrecision G₁ G₂)
-    (h : CheckedTargetTy gct G₁) :
-    CheckedTargetTy gct G₂ := by
-  exact checkedTargetTy_precision
-    (by
-      simpa [AnnotationTargetPrecision] using
-        localTypePrecision_of_checkedTargetPrecision hprec)
-    h
-
-private theorem checkedTargetTy_checkedTargetPrecision
-    (h : CheckedTargetTy gct (interpTarget T₁))
-    (hprec : CheckedTargetPrecision T₁ T₂) :
-    CheckedTargetTy gct (interpTarget T₂) := by
-  have hprec' : AnnotationTargetPrecision (interpTarget T₁) (interpTarget T₂) := by
-    simpa [AnnotationTargetPrecision] using hprec
-  exact checkedTargetTy_annotationPrecision hprec' h
-
-/-- Class negations are admissible class formulas. -/
-theorem checkedTargetTy_negClass :
-    CheckedTargetTy gct (.negClass cname) :=
-  .classFormula .negClass
-
-/-! ### Preservation of `runtimePublicTy` -/
-
-/-- `runtimePublicTy` preserves the formula fragment. -/
-theorem formulaGTy_runtimePublicTy (h : FormulaGTy G) : FormulaGTy (runtimePublicTy G) := by
-  induction h with
-  | any => exact .any
-  | class_ => exact .class_
-  | bottom => exact .bottom
-  | negClass => exact .negClass
-  | union _ _ ihF ihG => simp only [runtimePublicTy]; exact .union ihF ihG
-  | intersection _ _ ihF ihG => simp only [runtimePublicTy]; exact .intersection ihF ihG
-
-/-- `FormulaHoldsForMro` is preserved by `runtimePublicTy` for formulas. -/
-theorem formulaHoldsForMro_runtimePublicTy
-    (hf : FormulaGTy G)
-    (hh : FormulaHoldsForMro mro G) :
-    FormulaHoldsForMro mro (runtimePublicTy G) := by
-  induction hf with
-  | any => exact trivial
-  | class_ => exact hh
-  | bottom => exact hh
-  | negClass => exact hh
-  | union _ _ ihF ihG =>
-    simp only [runtimePublicTy, FormulaHoldsForMro] at hh ⊢
-    exact hh.elim (.inl ∘ ihF) (.inr ∘ ihG)
-  | intersection _ _ ihF ihG =>
-    simp only [runtimePublicTy, FormulaHoldsForMro] at hh ⊢
-    exact ⟨ihF hh.1, ihG hh.2⟩
-
-/-- `runtimePublicTy` preserves BM-compatibility. -/
-theorem bmCompatibleFormula_runtimePublicTy
-    (h : BMCompatibleFormula gct G) :
-    BMCompatibleFormula gct (runtimePublicTy G) :=
-  ⟨formulaGTy_runtimePublicTy h.1,
-   fun _ _ hfind hmro =>
-     formulaHoldsForMro_runtimePublicTy h.1 (h.2 _ _ hfind hmro)⟩
-
-/-- `runtimePublicTy` preserves the admissible checked target fragment. -/
-theorem checkedTargetTy_runtimePublicTy
-    (h : CheckedTargetTy gct G) : CheckedTargetTy gct (runtimePublicTy G) := by
-  induction h with
-  | classFormula hf => exact .classFormula (formulaGTy_runtimePublicTy hf)
-  | callable _ _ ihP ihR => simp only [runtimePublicTy]; exact .callable ihP ihR
-  | union _ _ ihG ihH => simp only [runtimePublicTy]; exact .union ihG ihH
-  | interCallableLeft _ _ hbm ihP ihR =>
-    simp only [runtimePublicTy]
-    exact .interCallableLeft ihP ihR (bmCompatibleFormula_runtimePublicTy hbm)
-  | interCallableRight hbm _ _ ihP ihR =>
-    simp only [runtimePublicTy]
-    exact .interCallableRight (bmCompatibleFormula_runtimePublicTy hbm) ihP ihR

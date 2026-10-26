@@ -60,164 +60,31 @@ def checkedTargetOfGTy : GTy → CheckedTarget
   | .bottom => .bottom
   | .negClass cname => .negClass cname
 
-/-- Embed a boundary contract into explicit checked-target syntax. -/
-def checkedTargetOfBoundaryContract : BoundaryContract → CheckedTarget
-  | .unknown => .any
-  | .class_ cname => .class_ cname
-  | .callable paramTy returnTy =>
-      .callable
-        (checkedTargetOfBoundaryContract paramTy)
-        (checkedTargetOfBoundaryContract returnTy)
-  | .union left right =>
-      .union
-        (checkedTargetOfBoundaryContract left)
-        (checkedTargetOfBoundaryContract right)
-  | .intersection left right =>
-      .intersection
-        (checkedTargetOfBoundaryContract left)
-        (checkedTargetOfBoundaryContract right)
-  | .bottom => .bottom
-  | .negClass cname => .negClass cname
-
 @[simp] theorem interpTarget_checkedTargetOfGTy
     (G : GTy) :
     interpTarget (checkedTargetOfGTy G) = G := by
   induction G <;> simp [interpTarget, checkedTargetOfGTy, *]
 
-@[simp] theorem checkedTargetOfGTy_interpTarget
-    (T : CheckedTarget) :
-    checkedTargetOfGTy (interpTarget T) = T := by
-  induction T <;> simp [interpTarget, checkedTargetOfGTy, *]
+/-- Embedding gradual types into explicit checked-target syntax is injective. -/
+theorem checkedTargetOfGTy_injective :
+    Function.Injective checkedTargetOfGTy :=
+  Function.LeftInverse.injective interpTarget_checkedTargetOfGTy
 
-@[simp] theorem compileBoundaryTarget_checkedTargetOfGTy
-    (G : GTy) :
-    compileBoundaryTarget (checkedTargetOfGTy G) = compileBoundaryRaw G := by
-  induction G <;> simp [compileBoundaryTarget, checkedTargetOfGTy, compileBoundaryRaw, *]
+/-- Equality of embedded gradual types is exactly equality of the source types. -/
+theorem checkedTargetOfGTy_eq_iff
+    (G H : GTy) :
+    checkedTargetOfGTy G = checkedTargetOfGTy H ↔
+      G = H :=
+  checkedTargetOfGTy_injective.eq_iff
 
-@[simp] theorem compileBoundaryTarget_checkedTargetOfBoundaryContract
-    (c : BoundaryContract) :
-    compileBoundaryTarget (checkedTargetOfBoundaryContract c) = c := by
-  induction c <;> simp [compileBoundaryTarget, checkedTargetOfBoundaryContract, *]
-
-@[simp] theorem checkedTargetOfBoundaryContract_compileBoundaryTarget
-    (T : CheckedTarget) :
-    checkedTargetOfBoundaryContract (compileBoundaryTarget T) = T := by
-  induction T <;> simp [compileBoundaryTarget, checkedTargetOfBoundaryContract, *]
-
-@[simp] theorem checkedTargetOfBoundaryContract_compileBoundaryRaw
-    (G : GTy) :
-    checkedTargetOfBoundaryContract (compileBoundaryRaw G) = checkedTargetOfGTy G := by
-  induction G <;> simp [checkedTargetOfBoundaryContract, compileBoundaryRaw, checkedTargetOfGTy, *]
-
-@[simp] theorem interpTarget_checkedTargetOfBoundaryContract
-    (c : BoundaryContract) :
-    interpTarget (checkedTargetOfBoundaryContract c) = boundaryMeaning c := by
-  induction c <;> simp [interpTarget, checkedTargetOfBoundaryContract, boundaryMeaning, *]
-
-theorem boundaryMeaning_compileBoundaryTarget
-    (T : CheckedTarget) :
-    boundaryMeaning (compileBoundaryTarget T) = interpTarget T := by
-  induction T <;> simp [boundaryMeaning, compileBoundaryTarget, interpTarget, *]
+/-- `checkedTargetOfGTy` commutes with proof-only conditional branching. -/
+theorem checkedTargetOfGTy_if
+    (p : Prop) [Decidable p] (G H : GTy) :
+    checkedTargetOfGTy (if p then G else H) =
+      if p then checkedTargetOfGTy G else checkedTargetOfGTy H :=
+  apply_ite checkedTargetOfGTy p G H
 
 theorem compileBoundaryTarget_eq_compileBoundaryRaw_interp
     (T : CheckedTarget) :
     compileBoundaryTarget T = compileBoundaryRaw (interpTarget T) := by
   induction T <;> simp [compileBoundaryTarget, compileBoundaryRaw, interpTarget, *]
-
-/-- The current checked-target normalizer is a semantic-preserving scaffold.
-It is intentionally weaker than the contract normalizer because machine-level
-`unknown` simplifications are not automatically valid `MoreStatic` rewrites on
-source `GTy`. -/
-def coreNormalizeCheckedTarget (T : CheckedTarget) : CheckedTarget :=
-  T
-
-@[simp] theorem normalize_idempotent
-    (T : CheckedTarget) :
-    coreNormalizeCheckedTarget (coreNormalizeCheckedTarget T) =
-      coreNormalizeCheckedTarget T :=
-  rfl
-
-@[simp] theorem normalize_semantic_faithful
-    (T : CheckedTarget) :
-    interpTarget (coreNormalizeCheckedTarget T) = interpTarget T :=
-  rfl
-
-@[simp] theorem normalize_compileBoundaryTarget
-    (T : CheckedTarget) :
-    compileBoundaryTarget (coreNormalizeCheckedTarget T) = compileBoundaryTarget T :=
-  rfl
-
-/-- Gct-free runtime/public shape invariant. The current baseline uses the
-checked-target normalizer fixpoint so later strengthening can happen behind the
-same interface. -/
-def RuntimePublicCheckedTargetShape (T : CheckedTarget) : Prop :=
-  coreNormalizeCheckedTarget T = T
-
-instance runtimePublicCheckedTargetShape_decidable
-    (T : CheckedTarget) :
-    Decidable (RuntimePublicCheckedTargetShape T) := by
-  unfold RuntimePublicCheckedTargetShape
-  infer_instance
-
-theorem runtimePublicCheckedTargetShape_normalized
-    (T : CheckedTarget) :
-    RuntimePublicCheckedTargetShape (coreNormalizeCheckedTarget T) := by
-  unfold RuntimePublicCheckedTargetShape
-  simp
-
-theorem runtimePublicCheckedTargetShape_all
-    (T : CheckedTarget) :
-    RuntimePublicCheckedTargetShape T := by
-  unfold RuntimePublicCheckedTargetShape
-  rfl
-
-/-- Raw runtime-public gradual targets embed into checked-target syntax through
-the dedicated checked-target layer. -/
-def checkedTargetOfRuntimePublicTy (G : GTy) : CheckedTarget :=
-  coreNormalizeCheckedTarget (checkedTargetOfGTy (runtimePublicTy G))
-
-@[simp] theorem interpTarget_checkedTargetOfRuntimePublicTy
-    (G : GTy) :
-    interpTarget (checkedTargetOfRuntimePublicTy G) = runtimePublicTy G := by
-  simp [checkedTargetOfRuntimePublicTy]
-
-@[simp] theorem compileBoundaryTarget_checkedTargetOfRuntimePublicTy
-    (G : GTy) :
-    compileBoundaryTarget (checkedTargetOfRuntimePublicTy G) =
-      compileBoundaryRaw (runtimePublicTy G) := by
-  rw [compileBoundaryTarget_eq_compileBoundaryRaw_interp, interpTarget_checkedTargetOfRuntimePublicTy]
-
-theorem checkedTargetOfRuntimePublicTy_runtimePublic_shape
-    (G : GTy) :
-    RuntimePublicCheckedTargetShape (checkedTargetOfRuntimePublicTy G) := by
-  unfold checkedTargetOfRuntimePublicTy
-  exact runtimePublicCheckedTargetShape_normalized _
-
-/-- Smart constructors route through the checked-target normalizer so later
-normalization strengthening remains local to this file. -/
-def mkCallable (paramTy returnTy : CheckedTarget) : CheckedTarget :=
-  coreNormalizeCheckedTarget (.callable paramTy returnTy)
-
-def mkUnion (left right : CheckedTarget) : CheckedTarget :=
-  coreNormalizeCheckedTarget (.union left right)
-
-def mkIntersection (left right : CheckedTarget) : CheckedTarget :=
-  coreNormalizeCheckedTarget (.intersection left right)
-
-@[simp] theorem interpTarget_mkCallable
-    (paramTy returnTy : CheckedTarget) :
-    interpTarget (mkCallable paramTy returnTy) =
-      .callable (interpTarget paramTy) (interpTarget returnTy) :=
-  rfl
-
-@[simp] theorem interpTarget_mkUnion
-    (left right : CheckedTarget) :
-    interpTarget (mkUnion left right) =
-      .union (interpTarget left) (interpTarget right) :=
-  rfl
-
-@[simp] theorem interpTarget_mkIntersection
-    (left right : CheckedTarget) :
-    interpTarget (mkIntersection left right) =
-      .intersection (interpTarget left) (interpTarget right) :=
-  rfl

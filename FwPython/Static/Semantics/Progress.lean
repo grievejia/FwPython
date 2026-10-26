@@ -6,63 +6,65 @@ import FwPython.Static.TypeSystem.WellFormedness
 
 A safe non-final state can always take a step. -/
 
+variable {ct : ClassTable}
+
 namespace SmallStep
 
 /-- Progress for a value + frame: the frame determines what step to take, regardless
     of how the frame's output type is wrapped by `sub` or `interIntro`. -/
 private theorem progress_val_frame
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct heap)
-    (hval : ValueHasType ct heap v T)
-    (hframe : FrameHasType ct heap Γ T Γ' outTy f) :
+    (hval : ValueHasType hwf.toWellFormedClassHierarchy heap v T)
+    (hframe : FrameHasType hwf.toWellFormedClassHierarchy heap Γ T Γ' outTy f) :
     ∃ s', Step ct { heap, env, control := .val v, continuation := f :: k } s' := by
   induction hframe generalizing v with
-  | attrAccess hfmt hsub hwfOut =>
+  | attrAccess hfmt _ =>
     obtain ⟨oid, obj, hveq, hlookObj⟩ := canonical_class hval
     subst hveq
     obtain ⟨c, mro, hfindC, hmroC⟩ := hheap.classesExist _ _ hlookObj
-    have hclsSub := objRef_class_subtype hheap hval .refl hlookObj hfindC hmroC
-    obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver
+    have hclsSub := objRef_class_subtype hwf hheap hval hlookObj hfindC hmroC
+    obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver hwf
       hfmt hclsSub hfindC hmroC
     exact ⟨_, .returnAttrAccess hlookObj hfindC hmroC hmethodFound rfl⟩
-  | attrAccessUnion hfmt1 hfmt2 hsubOut hwfOut =>
+  | attrAccessUnion hfmt1 hfmt2 _ =>
     obtain ⟨obj, hlookObj⟩ := objRef_has_heap_entry hval
     obtain ⟨c, mro, hfindC, hmroC⟩ := hheap.classesExist _ _ hlookObj
-    have hclsDisj := objRef_union_class_decompose hheap hval hlookObj hfindC hmroC
+    have hclsDisj := objRef_union_class_decompose hwf hheap hval hlookObj hfindC hmroC
     rcases hclsDisj with hclsSub | hclsSub
-    · obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver
+    · obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver hwf
         hfmt1 hclsSub hfindC hmroC
       exact ⟨_, .returnAttrAccess hlookObj hfindC hmroC hmethodFound rfl⟩
-    · obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver
+    · obtain ⟨m, hmethodFound⟩ := typed_method_exists_on_runtime_receiver hwf
         hfmt2 hclsSub hfindC hmroC
       exact ⟨_, .returnAttrAccess hlookObj hfindC hmroC hmethodFound rfl⟩
-  | callCallee harg hsubRet hwfOut =>
-    obtain ⟨oid, recvOid, m, recvObj, hveq, hlookCallee, hlookRecv, hprov⟩ :=
-      canonical_callable hheap hval
+  | callCallee _ _ =>
+    obtain ⟨_, _, _, _, hveq, hlookCallee, _, _⟩ :=
+      canonical_callable hwf hheap hval
     subst hveq
     exact ⟨_, .returnCallCallee hlookCallee⟩
-  | awaitArgument hlookRecv hprov hsubRet hwfOut =>
+  | awaitArgument _ _ _ =>
     exact ⟨_, .returnAwaitArgument⟩
-  | cond hthen helse hsubRet hwfOut =>
+  | cond _ _ _ =>
     obtain ⟨oid, obj, hveq, hlookObj⟩ := canonical_class hval
     subst hveq
     obtain ⟨c, mro, hfindC, hmroC⟩ := hheap.classesExist _ _ hlookObj
-    have hclsSub := objRef_class_subtype hheap hval .refl hlookObj hfindC hmroC
+    have hclsSub := objRef_class_subtype hwf hheap hval hlookObj hfindC hmroC
     have hIsBool := bool_subtype_is_bool hwf hclsSub hfindC hmroC
     rcases hheap.boolExhaustive oid obj hlookObj hIsBool with rfl | rfl
     · exact ⟨_, .returnCondTrue⟩
     · exact ⟨_, .returnCondFalse⟩
-  | returnTo henvCaller =>
+  | returnTo _ =>
     exact ⟨_, .returnFromBody⟩
-  | @sub Γ inTy Γ' outTy f outTy' hf' hsub hwfOut ih =>
+  | sub _ _ ih =>
     exact ih hval
-  | @interIntro Γ inTy₁ Γ' outTy₁ f inTy₂ outTy₂ hf1 hf2 hwfIn1 hwfIn2 ih1 ih2 =>
-    exact ih1 (.sub hval (.interLeft .refl) hwfIn1)
+  | interIntro _ _ hwfIn1 hwfIn2 ih1 _ =>
+    exact ih1 (.sub hval (.interLeft (.refl hwfIn1) hwfIn2))
 
 /-- Progress: every safe non-final state can take a step. -/
 theorem progress
-    (hwf : WellFormedClassTable ct)
-    (hsafe : StateSafe ct heap env ctrl cont expectedType)
+    (hwf : WellTypedClassHierarchy ct)
+    (hsafe : StateSafe hwf.toWellFormedClassHierarchy heap env ctrl cont expectedType)
     (hnonfinal : finalResult? { heap, env, control := ctrl, continuation := cont } = none) :
     ∃ s', Step ct { heap, env, control := ctrl, continuation := cont } s' := by
   obtain ⟨Γ, outΓ, T, hheap, henv, hctrl, hcont⟩ := hsafe
@@ -84,7 +86,7 @@ theorem progress
         | none => exact ⟨_, .condIsInstanceVarNotFound hv⟩
         | some v =>
           obtain ⟨oid⟩ := v
-          obtain ⟨S, cls, hlookΓ, hfindCls⟩ := has_type_cond_isInstance_inv htype
+          obtain ⟨S, cls, hlookΓ, _⟩ := has_type_cond_isInstance_inv htype
           obtain ⟨v', henvLook, hvalTy⟩ := henv x S hlookΓ
           rw [hv] at henvLook; cases henvLook
           obtain ⟨obj, hlookHeap⟩ := objRef_has_heap_entry hvalTy
@@ -116,7 +118,7 @@ theorem progress
             · exact ⟨_, .newSuccess hfc hbool hnone hbm rfl⟩
     | isInstance varName targetClass =>
       -- Need typing to show the variable is bound in env
-      obtain ⟨⟨T', hlookΓ⟩, ⟨cls, hfindCls⟩, _⟩ := has_type_isInstance_inv htype
+      obtain ⟨⟨T', hlookΓ⟩, ⟨_, _⟩, _⟩ := has_type_isInstance_inv htype
       obtain ⟨v, henvLook, hvalTy⟩ := henv varName T' hlookΓ
       -- v must be .objRef oid since Value only has one constructor
       obtain ⟨oid⟩ := v

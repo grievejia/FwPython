@@ -1,6 +1,8 @@
 import FwPython.Common.MRO.Core
 
-/-! # MRO membership and method-lookup propagation, parameterized over the method payload. -/
+/-! # MRO membership, inherited order, and method-lookup propagation
+
+These properties apply to any method payload. -/
 
 /-- Object is always a member of every MRO. -/
 theorem mro_contains_object {Method : Type}
@@ -28,6 +30,63 @@ theorem mro_contains_object {Method : Type}
         (ih_parents pm (List.Mem.head _)))
     hmro
 
+/-- An ancestor's complete MRO occurs in the child's MRO in the same order. -/
+theorem mro_sublist {Method : Type}
+    (ct : ClassTableDecl Method) (c a : ClassDecl Method)
+    (mro_c mro_a : List Identifier)
+    (hfc : findClass ct c.name = some c)
+    (hmc : ComputeMro ct c mro_c)
+    (hfa : findClass ct a.name = some a)
+    (hma : ComputeMro ct a mro_a)
+    (ha : a.name ∈ mro_c) : mro_a.Sublist mro_c := by
+  have key := ComputeMro.rec
+    (motive_1 := fun ct _ parentMros _ =>
+      ∀ pm, pm ∈ parentMros →
+      ∀ (a : ClassDecl Method) (mro_a : List Identifier),
+        findClass ct a.name = some a → ComputeMro ct a mro_a →
+        a.name ∈ pm → mro_a.Sublist pm)
+    (motive_2 := fun ct c mro _ =>
+      ∀ (a : ClassDecl Method) (mro_a : List Identifier),
+        findClass ct c.name = some c →
+        findClass ct a.name = some a → ComputeMro ct a mro_a →
+        a.name ∈ mro → mro_a.Sublist mro)
+    (fun _ hm => absurd hm List.not_mem_nil)
+    (fun {_} {_} {_} {_} {_} {_}
+         hfind _ _ ih_mro ih_rest pm hmem a' mro_a' hfa' hma' ha'mem => by
+      rcases List.mem_cons.mp hmem with rfl | hmem'
+      · exact ih_mro a' mro_a' (findClass_self hfind) hfa' hma' ha'mem
+      · exact ih_rest pm hmem' a' mro_a' hfa' hma' ha'mem)
+    (fun {_} {_} hnil a' mro_a' hfc' hfa' hma' ha'mem => by
+      simp only [List.mem_cons, List.mem_nil_iff, or_false] at ha'mem
+      rw [ha'mem] at hfa'
+      rw [hfc'] at hfa'; cases hfa'
+      have := determinism hma' (ComputeMro.root hnil)
+      rw [this]
+      exact .refl _)
+    (fun {_} {_} {_} {_} {_}
+         hbases hne hall hmerge ih_parents a' mro_a' hfc' hfa' hma' ha'mem => by
+      simp only [List.mem_cons] at ha'mem
+      cases ha'mem with
+      | inl ha'eq =>
+        rw [ha'eq] at hfa'
+        rw [hfc'] at hfa'; cases hfa'
+        rw [determinism hma' (ComputeMro.step hbases hne hall hmerge)]
+        exact .refl _
+      | inr ha'in_merged =>
+        obtain ⟨l, hl, ha'l⟩ := c3Merge_sound hmerge a'.name ha'in_merged
+        rcases List.mem_append.mp hl with hl_pm | hl_bases
+        · exact .cons _ ((ih_parents l hl_pm a' mro_a' hfa' hma' ha'l).trans
+            (c3Merge_sublist hmerge l (List.mem_append_left _ hl_pm)))
+        · simp only [List.mem_cons, List.mem_nil_iff, or_false] at hl_bases
+          subst hl_bases
+          obtain ⟨a'cls, a'pmro, hfa'cls, hmro_a'cls, ha'pmro_mem⟩ :=
+            allParentMros_mem hall ha'l
+          rw [hfa'] at hfa'cls; cases hfa'cls
+          rw [← determinism hmro_a'cls hma']
+          exact .cons _ (c3Merge_sublist hmerge a'pmro (List.mem_append_left _ ha'pmro_mem)))
+    hmc
+  exact key a mro_a hfc hfa hma ha
+
 /-- Transitivity of MRO membership: if `a.name` appears in the MRO of `c`,
     and `b` appears in the MRO of `a`, then `b` appears in the MRO of `c`. -/
 theorem mro_mem_trans {Method : Type}
@@ -39,58 +98,50 @@ theorem mro_mem_trans {Method : Type}
     (hma : ComputeMro ct a mro_a)
     (ha : a.name ∈ mro_c)
     (hb : b ∈ mro_a) :
-    b ∈ mro_c := by
-  have key := ComputeMro.rec
-    (motive_1 := fun ct _ parentMros _ =>
-      ∀ pm, pm ∈ parentMros →
-      ∀ (a : ClassDecl Method) (mro_a : List Identifier) (b : Identifier),
-        findClass ct a.name = some a → ComputeMro ct a mro_a →
-        a.name ∈ pm → b ∈ mro_a → b ∈ pm)
-    (motive_2 := fun ct c mro _ =>
-      ∀ (a : ClassDecl Method) (mro_a : List Identifier) (b : Identifier),
-        findClass ct c.name = some c →
-        findClass ct a.name = some a → ComputeMro ct a mro_a →
-        a.name ∈ mro → b ∈ mro_a → b ∈ mro)
-    (fun _ hm => absurd hm List.not_mem_nil)
-    (fun {_} {_} {_} {_} {_} {_}
-         hfind _ _ ih_mro ih_rest pm hmem a' mro_a' b' hfa' hma' ha'mem hb' => by
-      rcases List.mem_cons.mp hmem with rfl | hmem'
-      · exact ih_mro a' mro_a' b' (findClass_self hfind) hfa' hma' ha'mem hb'
-      · exact ih_rest pm hmem' a' mro_a' b' hfa' hma' ha'mem hb')
-    (fun {_} {_} hnil a' mro_a' b' hfc' hfa' hma' ha'mem hb' => by
-      simp only [List.mem_cons, List.mem_nil_iff, or_false] at ha'mem
-      rw [ha'mem] at hfa'
-      rw [hfc'] at hfa'; cases hfa'
-      have := determinism hma' (ComputeMro.root hnil)
-      rw [this] at hb'
-      exact hb')
-    (fun {_} {_} {_} {_} {_}
-         hbases hne hall hmerge ih_parents a' mro_a' b' hfc' hfa' hma' ha'mem hb' => by
-      simp only [List.mem_cons] at ha'mem
-      cases ha'mem with
-      | inl ha'eq =>
-        rw [ha'eq] at hfa'
-        rw [hfc'] at hfa'; cases hfa'
-        have := determinism hma' (ComputeMro.step hbases hne hall hmerge)
-        rw [this] at hb'
-        exact hb'
-      | inr ha'in_merged =>
-        obtain ⟨l, hl, ha'l⟩ := c3Merge_sound hmerge a'.name ha'in_merged
-        rcases List.mem_append.mp hl with hl_pm | hl_bases
-        · have hb'_in_pm := ih_parents l hl_pm a' mro_a' b' hfa' hma' ha'l hb'
-          exact List.mem_cons_of_mem _ (c3Merge_complete hmerge l
-            (List.mem_append_left _ hl_pm) b' hb'_in_pm)
-        · simp only [List.mem_cons, List.mem_nil_iff, or_false] at hl_bases
-          subst hl_bases
-          obtain ⟨a'cls, a'pmro, hfa'cls, hmro_a'cls, ha'pmro_mem⟩ :=
-            allParentMros_mem hall ha'l
-          rw [hfa'] at hfa'cls; cases hfa'cls
-          have ha'det := determinism hmro_a'cls hma'
-          subst ha'det
-          exact List.mem_cons_of_mem _ (c3Merge_complete hmerge a'pmro
-            (List.mem_append_left _ ha'pmro_mem) b' hb'))
-    hmc
-  exact key a mro_a b hfc hfa hma ha hb
+    b ∈ mro_c :=
+  (mro_sublist ct c a mro_c mro_a hfc hmc hfa hma ha).subset hb
+
+/-- A selected class's MRO contains each class name at most once. -/
+theorem mro_nodup {Method : Type} {ct : ClassTableDecl Method}
+    {c : ClassDecl Method} {mro : List Identifier}
+    (selected : findClass ct c.name = some c)
+    (computed : ComputeMro ct c mro) : mro.Nodup := by
+  cases computed with
+  | root => simp
+  | step bases nonempty parents merged =>
+    refine List.nodup_cons.mpr ⟨?_, c3Merge_nodup merged⟩
+    intro repeated
+    obtain ⟨input, inputMember, occurs⟩ := c3Merge_sound merged c.name repeated
+    rcases List.mem_append.mp inputMember with parentMember | baseMember
+    · have parentSelected := AllParentMros.rec
+        (motive_1 := fun table _ mros _ => ∀ input, input ∈ mros →
+          ∃ declaration, findClass table declaration.name = some declaration ∧
+            ComputeMro table declaration input)
+        (motive_2 := fun _ _ _ _ => True)
+        (fun _ impossible => absurd impossible List.not_mem_nil)
+        (fun lookup computed _ _ ih input member => by
+          rcases List.mem_cons.mp member with rfl | member
+          · exact ⟨_, findClass_self lookup, computed⟩
+          · exact ih input member)
+        (fun _ => trivial) (fun _ _ _ _ _ => trivial) parents
+      obtain ⟨parent, parentLookup, parentComputed⟩ := parentSelected input parentMember
+      have sub := (mro_sublist ct parent c input _ parentLookup parentComputed selected
+          (.step bases nonempty parents merged) occurs).trans
+        (c3Merge_sublist merged input (List.mem_append_left _ parentMember))
+      have := sub.length_le
+      simp only [List.length_cons] at this
+      omega
+    · simp only [List.mem_cons, List.mem_nil_iff, or_false] at baseMember
+      subst input
+      obtain ⟨actual, parentMro, actualLookup, parentComputed, parentMember⟩ := allParentMros_mem parents occurs
+      rw [selected] at actualLookup
+      cases actualLookup
+      have same := determinism (.step bases nonempty parents merged) parentComputed
+      have sub := c3Merge_sublist merged parentMro (List.mem_append_left _ parentMember)
+      rw [← same] at sub
+      have := sub.length_le
+      simp only [List.length_cons] at this
+      omega
 
 /-- Every member of an MRO corresponds to a class with a valid MRO,
     given that all classes in the table have valid MROs. -/

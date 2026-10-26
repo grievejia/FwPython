@@ -23,24 +23,6 @@ theorem findGMethodInMro_first_definer
           findGMethodInList gc.methods methodName = none) :=
   findMethodInMro_first_definer h
 
-theorem findGMethodInMro_first_definer_unique
-    {mro : List Identifier}
-    {prefix₁ prefix₂ suffix₁ suffix₂ : List Identifier}
-    {definer₁ definer₂ methodName : Identifier}
-    {d₁ d₂ : GClass} {m₁ m₂ : GMethod}
-    (h₁ : mro = prefix₁ ++ definer₁ :: suffix₁)
-    (hprefix₁ : ∀ cname ∈ prefix₁, ∀ gc, findGClass ct cname = some gc →
-      findGMethodInList gc.methods methodName = none)
-    (hfind₁ : findGClass ct definer₁ = some d₁)
-    (hmethod₁ : findGMethodInList d₁.methods methodName = some m₁)
-    (h₂ : mro = prefix₂ ++ definer₂ :: suffix₂)
-    (hprefix₂ : ∀ cname ∈ prefix₂, ∀ gc, findGClass ct cname = some gc →
-      findGMethodInList gc.methods methodName = none)
-    (hfind₂ : findGClass ct definer₂ = some d₂)
-    (hmethod₂ : findGMethodInList d₂.methods methodName = some m₂) :
-    definer₁ = definer₂ :=
-  findMethodInMro_first_definer_unique h₁ hprefix₁ hfind₁ hmethod₁ h₂ hprefix₂ hfind₂ hmethod₂
-
 theorem findGMethodInMro_of_ancestor
     {ct : GClassTable} {cls : GClass} {mro : List Identifier}
     (hmro : GComputeMro ct cls mro)

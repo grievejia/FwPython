@@ -7,15 +7,17 @@ import FwPython.Static.Semantics.MultiStep
 A well-typed initial expression state can only terminate in a successful
 value of the claimed type. -/
 
+variable {ct : ClassTable}
+
 namespace SmallStep
 
 /-- A safe final state must end in a value (not a runtime error),
     and that value has the expected type. -/
 theorem safe_final_is_success
-    (_hwf : WellFormedClassTable ct)
-    (hsafe : StateSafe ct heap env ctrl [] expectedType)
+    (_hwf : WellTypedClassHierarchy ct)
+    (hsafe : StateSafe _hwf.toWellFormedClassHierarchy heap env ctrl [] expectedType)
     (hfinal : finalResult? { heap, env, control := ctrl, continuation := [] } = some (heap', result)) :
-    ∃ v, result = .success v ∧ ValueHasType ct heap' v expectedType := by
+    ∃ v, result = .success v ∧ ValueHasType _hwf.toWellFormedClassHierarchy heap' v expectedType := by
   obtain ⟨Γ, outΓ, T, hheap, henv, hctrl, hcont⟩ := hsafe
   cases hcont
   cases hctrl with
@@ -29,15 +31,15 @@ theorem safe_final_is_success
     If we start from a well-typed expression state and reach a final state,
     the result is a successful value of the claimed type. -/
 theorem soundness
-    (hwf : WellFormedClassTable ct)
+    (hwf : WellTypedClassHierarchy ct)
     (hheap : HeapWellFormed ct h)
-    (henv : EnvHasType ct h env Γ)
-    (htype : HasType ct Γ e T)
+    (henv : EnvHasType hwf.toWellFormedClassHierarchy h env Γ)
+    (htype : HasType hwf.toWellFormedClassHierarchy Γ e T)
     (hexec : evaluatesFrom ct h env e h' result) :
-    ∃ v, result = .success v ∧ ValueHasType ct h' v T := by
+    ∃ v, result = .success v ∧ ValueHasType hwf.toWellFormedClassHierarchy h' v T := by
   obtain ⟨finalState, hsteps, hfinal⟩ := hexec
   -- Build the initial StateSafe for the expression state
-  have hsafe₀ : StateSafe ct h env (.expr e) [] T :=
+  have hsafe₀ : StateSafe hwf.toWellFormedClassHierarchy h env (.expr e) [] T :=
     ⟨Γ, Γ, T, hheap, henv, .expr htype, .nil⟩
   -- Destructure the final state
   obtain ⟨fh, fe, fc, fk⟩ := finalState
@@ -51,5 +53,21 @@ theorem soundness
     simp [finalResult_none_of_nonempty_continuation] at hfinal
   | nil =>
     exact safe_final_is_success hwf hsafe_final hfinal
+
+/-- A closed, well-typed program that terminates returns a value of its main type.
+The initial heap requirements follow from the class table. -/
+theorem program_soundness (hwf : WellTypedClassHierarchy p.classes)
+    (typing : HasType hwf.toWellFormedClassHierarchy [] p.main T)
+    (execution : programExecute p result) :
+    ∃ heap value, result = .success value ∧ ValueHasType hwf.toWellFormedClassHierarchy heap value T := by
+  obtain ⟨state, heap, steps, final⟩ := execution
+  have execution : evaluatesFrom p.classes Heap.initial [] p.main heap result :=
+    ⟨state, steps, final⟩
+  have env : EnvHasType hwf.toWellFormedClassHierarchy Heap.initial [] [] := by
+    intro name type lookup
+    cases lookup
+  obtain ⟨value, success, valueTyping⟩ :=
+    soundness hwf (Heap.initial_wellFormed hwf) env typing execution
+  exact ⟨heap, value, success, valueTyping⟩
 
 end SmallStep

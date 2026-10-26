@@ -1,3 +1,5 @@
+import FwPython.Gradual.TypeSystem.TargetAdmissibility
+import FwPython.Gradual.TypeSystem.WellFormedness
 import FwPython.Gradual.TypeSystem.CheckedTargetSyntax
 
 namespace Checked
@@ -33,28 +35,6 @@ private def checkedTargetOrderTokens : CheckedTarget → List Nat
 def checkedTargetCmp (a b : CheckedTarget) : Ordering :=
   natListCmp (checkedTargetOrderTokens a) (checkedTargetOrderTokens b)
 
-private theorem natListCmp_swap :
-    ∀ (as bs : List Nat), natListCmp as bs = (natListCmp bs as).swap
-  | [], [] => rfl
-  | [], _ :: _ => rfl
-  | _ :: _, [] => rfl
-  | a :: as, b :: bs => by
-      unfold natListCmp
-      have hab : compare a b = (compare b a).swap := by
-        simpa using (Nat.compare_swap b a).symm
-      cases hba : compare b a <;>
-        simp [hab, hba, Ordering.swap, natListCmp_swap as bs]
-
-theorem checkedTargetCmp_swap (a b : CheckedTarget) :
-    checkedTargetCmp a b = (checkedTargetCmp b a).swap := by
-  unfold checkedTargetCmp
-  exact natListCmp_swap _ _
-
-theorem checkedTargetCmp_lt_of_gt {a b : CheckedTarget}
-    (h : checkedTargetCmp a b = .gt) :
-    checkedTargetCmp b a = .lt := by
-  rw [checkedTargetCmp_swap, h]; rfl
-
 def normalizeCallParamAnnotationIntersection
     (left right : CheckedTarget) : CheckedTarget :=
   if left = right then left
@@ -73,8 +53,8 @@ def callParamAnnotationRawIntersection
   | G, H =>
       if G = H then G
       else if checkedTargetCmp
-          (checkedTargetOfRuntimePublicTy G)
-          (checkedTargetOfRuntimePublicTy H) = .gt then
+          (checkedTargetOfGTy G)
+          (checkedTargetOfGTy H) = .gt then
         .intersection H G
       else
         .intersection G H
@@ -94,68 +74,200 @@ def callParamAnnotationRaw : GTy → GTy
         (callParamAnnotationRaw G)
         (callParamAnnotationRaw H)
 
-def callParamAnnotationTarget (G : GTy) : CheckedTarget :=
-  checkedTargetOfRuntimePublicTy (callParamAnnotationRaw G)
+end Checked
 
-private theorem checkedTargetOfGTy_injective :
-    Function.Injective checkedTargetOfGTy :=
-  fun _ _ hEq => by simpa using congrArg interpTarget hEq
+private abbrev normalizeCallParamUnion (left right : GTy) : GTy :=
+  Checked.callParamAnnotationRawUnion left right
 
-private theorem checkedTargetOfGTy_eq_iff
+private abbrev normalizeCallParamIntersection (left right : GTy) : GTy :=
+  Checked.callParamAnnotationRawIntersection left right
+
+/-- Source-facing normalized parameter target used by compiled calls. The
+target is computed only from the source argument type; class-table facts are
+proved separately by the admissibility lemmas below. -/
+def callParamTarget (argSrcTy : GTy) : GTy :=
+  Checked.callParamAnnotationRaw argSrcTy
+
+-- Local unfolding lets the shape and validity proofs use the parameter operations directly.
+attribute [local simp] Checked.callParamAnnotationRaw Checked.callParamAnnotationRawUnion
+  Checked.callParamAnnotationRawIntersection
+
+private theorem normalizeCallParamUnion_formula
+    (hLeft : FormulaGTy left)
+    (hRight : FormulaGTy right) :
+    FormulaGTy (normalizeCallParamUnion left right) := by
+  by_cases hleft : left = .any
+  · subst hleft
+    exact .any
+  · by_cases hright : right = .any
+    · subst hright
+      cases left <;> exact .any
+    · simpa [normalizeCallParamUnion, hleft, hright] using
+        FormulaGTy.union hLeft hRight
+
+private theorem normalizeCallParamIntersection_formula
+    (hLeft : FormulaGTy left)
+    (hRight : FormulaGTy right) :
+    FormulaGTy (normalizeCallParamIntersection left right) := by
+  by_cases hleftAny : left = .any
+  · subst hleftAny
+    simp [normalizeCallParamIntersection] at hRight ⊢
+    exact hRight
+  · by_cases hrightAny : right = .any
+    · subst hrightAny
+      simp [normalizeCallParamIntersection] at hLeft ⊢
+      exact hLeft
+    · by_cases hleftBottom : left = .bottom
+      · subst hleftBottom
+        cases right <;> exact .bottom
+      · by_cases hrightBottom : right = .bottom
+        · subst hrightBottom
+          cases left <;> exact .bottom
+        · by_cases hEq : left = right
+          · subst hEq
+            simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+              hleftBottom, hrightBottom] using hLeft
+          · by_cases hOrd :
+              Checked.checkedTargetCmp
+                  (checkedTargetOfGTy left)
+                  (checkedTargetOfGTy right) = .gt
+            · simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+                hleftBottom, hrightBottom, hEq, hOrd] using
+                FormulaGTy.intersection hRight hLeft
+            · simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+                hleftBottom, hrightBottom, hEq, hOrd] using
+                FormulaGTy.intersection hLeft hRight
+
+private theorem normalizeCallParamUnion_wellFormed
+    (hwfLeft : WellFormedGTy gct left)
+    (hwfRight : WellFormedGTy gct right) :
+    WellFormedGTy gct (normalizeCallParamUnion left right) := by
+  by_cases hleft : left = .any
+  · subst hleft
+    exact .any
+  · by_cases hright : right = .any
+    · subst hright
+      cases left <;> exact .any
+    · simpa [normalizeCallParamUnion, hleft, hright] using
+        WellFormedGTy.union hwfLeft hwfRight
+
+private theorem normalizeCallParamIntersection_wellFormed
+    (hwfLeft : WellFormedGTy gct left)
+    (hwfRight : WellFormedGTy gct right) :
+    WellFormedGTy gct (normalizeCallParamIntersection left right) := by
+  by_cases hleftAny : left = .any
+  · subst hleftAny
+    simp [normalizeCallParamIntersection] at hwfRight ⊢
+    exact hwfRight
+  · by_cases hrightAny : right = .any
+    · subst hrightAny
+      simp [normalizeCallParamIntersection] at hwfLeft ⊢
+      exact hwfLeft
+    · by_cases hleftBottom : left = .bottom
+      · subst hleftBottom
+        cases right <;> exact .bottom
+      · by_cases hrightBottom : right = .bottom
+        · subst hrightBottom
+          cases left <;> exact .bottom
+        · by_cases hEq : left = right
+          · subst hEq
+            simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+              hleftBottom, hrightBottom] using hwfLeft
+          · by_cases hOrd :
+              Checked.checkedTargetCmp
+                  (checkedTargetOfGTy left)
+                  (checkedTargetOfGTy right) = .gt
+            · simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+                hleftBottom, hrightBottom, hEq, hOrd] using
+                WellFormedGTy.intersection hwfRight hwfLeft
+            · simpa [normalizeCallParamIntersection, hleftAny, hrightAny,
+                hleftBottom, hrightBottom, hEq, hOrd] using
+                WellFormedGTy.intersection hwfLeft hwfRight
+
+theorem callParamTarget_formula
+    (G : GTy) :
+    FormulaGTy (callParamTarget G) := by
+  induction G with
+  | any =>
+      exact .any
+  | class_ =>
+      exact .class_
+  | bottom =>
+      exact .bottom
+  | negClass =>
+      exact .negClass
+  | callable _ _ =>
+      exact .any
+  | union _ _ ihG ihH =>
+      exact normalizeCallParamUnion_formula ihG ihH
+  | intersection _ _ ihG ihH =>
+      exact normalizeCallParamIntersection_formula ihG ihH
+
+theorem callParamTarget_checkedTarget
+    (gct : GClassTable) (argSrcTy : GTy) :
+    CheckedTargetTy gct (callParamTarget argSrcTy) :=
+  .classFormula (callParamTarget_formula argSrcTy)
+
+theorem callParamTarget_wellFormed
+    (hwf : WellFormedGTy gct argSrcTy) :
+    WellFormedGTy gct (callParamTarget argSrcTy) := by
+  induction hwf with
+  | any =>
+      exact .any
+  | bottom =>
+      exact .bottom
+  | class_ hfind hmro =>
+      exact .class_ hfind hmro
+  | negClass hfind hmro =>
+      exact .negClass hfind hmro
+  | callable _ _ =>
+      exact .any
+  | union _ _ ihG ihH =>
+      exact normalizeCallParamUnion_wellFormed ihG ihH
+  | intersection _ _ ihG ihH =>
+      exact normalizeCallParamIntersection_wellFormed ihG ihH
+
+/-- Checked-target image of `callParamTarget`, used directly by checked calls. -/
+def callParamCheckedTarget (argSrcTy : GTy) : CheckedTarget :=
+  checkedTargetOfGTy (callParamTarget argSrcTy)
+
+@[simp] theorem interpTarget_callParamCheckedTarget
+    (argSrcTy : GTy) :
+    interpTarget (callParamCheckedTarget argSrcTy) =
+      callParamTarget argSrcTy := by
+  simp [callParamCheckedTarget]
+
+theorem callParamCheckedTarget_intersection_any_left
+    (G : GTy) :
+    callParamCheckedTarget (.intersection .any G) =
+      callParamCheckedTarget G := rfl
+
+/-- The parameter target for a union is the union of its targets, unless either target is any. -/
+theorem callParamCheckedTarget_union
     (G H : GTy) :
-    checkedTargetOfGTy G = checkedTargetOfGTy H ↔
-      G = H :=
-  ⟨fun h => checkedTargetOfGTy_injective h, fun h => h ▸ rfl⟩
-
-private theorem checkedTargetOfGTy_if
-    (p : Prop) [Decidable p] (G H : GTy) :
-    checkedTargetOfGTy (if p then G else H) =
-      if p then checkedTargetOfGTy G else checkedTargetOfGTy H := by
-  by_cases hp : p <;> simp [hp]
-
-@[simp] theorem callParamAnnotationTarget_any :
-    callParamAnnotationTarget .any = .any := rfl
-
-@[simp] theorem callParamAnnotationTarget_class_ (C : Identifier) :
-    callParamAnnotationTarget (.class_ C) = .class_ C := rfl
-
-@[simp] theorem callParamAnnotationTarget_callable (P R : GTy) :
-    callParamAnnotationTarget (.callable P R) = .any := rfl
-
-@[simp] theorem callParamAnnotationTarget_bottom :
-    callParamAnnotationTarget .bottom = .bottom := rfl
-
-@[simp] theorem callParamAnnotationTarget_negClass (C : Identifier) :
-    callParamAnnotationTarget (.negClass C) = .negClass C := rfl
-
-theorem callParamAnnotationTarget_union
-    (G H : GTy) :
-    callParamAnnotationTarget (.union G H) =
-      match callParamAnnotationTarget G, callParamAnnotationTarget H with
+    callParamCheckedTarget (.union G H) =
+      match callParamCheckedTarget G, callParamCheckedTarget H with
       | .any, _ => .any
       | _, .any => .any
       | G', H' => .union G' H' := by
-  cases hG : callParamAnnotationRaw G <;>
-    cases hH : callParamAnnotationRaw H <;>
-    simp [callParamAnnotationTarget, callParamAnnotationRaw, callParamAnnotationRawUnion,
-      checkedTargetOfRuntimePublicTy, checkedTargetOfGTy, runtimePublicTy_id,
-      coreNormalizeCheckedTarget, hG, hH]
+  cases hG : Checked.callParamAnnotationRaw G <;>
+    cases hH : Checked.callParamAnnotationRaw H <;>
+    simp [callParamCheckedTarget, callParamTarget, Checked.callParamAnnotationRaw,
+      Checked.callParamAnnotationRawUnion, checkedTargetOfGTy, hG, hH]
 
-theorem callParamAnnotationTarget_intersection
+/-- Intersection parameter targets discard any and absorb bottom. Equal targets occur once;
+distinct targets are placed in a fixed order. -/
+theorem callParamCheckedTarget_intersection
     (G H : GTy) :
-    callParamAnnotationTarget (.intersection G H) =
-      match callParamAnnotationTarget G, callParamAnnotationTarget H with
+    callParamCheckedTarget (.intersection G H) =
+      match callParamCheckedTarget G, callParamCheckedTarget H with
       | .any, T => T
       | T, .any => T
       | .bottom, _ => .bottom
       | _, .bottom => .bottom
-      | T, U => normalizeCallParamAnnotationIntersection T U := by
-  cases hG : callParamAnnotationRaw G <;>
-    cases hH : callParamAnnotationRaw H <;>
-    simp [callParamAnnotationTarget, callParamAnnotationRaw, callParamAnnotationRawIntersection,
-      normalizeCallParamAnnotationIntersection,
-      checkedTargetOfRuntimePublicTy, checkedTargetOfGTy, runtimePublicTy,
-      runtimePublicTy_id, coreNormalizeCheckedTarget, checkedTargetOfGTy_eq_iff,
-      checkedTargetOfGTy_if, hG, hH]
-
-end Checked
+      | T, U => Checked.normalizeCallParamAnnotationIntersection T U := by
+  cases hG : Checked.callParamAnnotationRaw G <;>
+    cases hH : Checked.callParamAnnotationRaw H <;>
+    simp [callParamCheckedTarget, callParamTarget, Checked.callParamAnnotationRaw,
+      Checked.callParamAnnotationRawIntersection, Checked.normalizeCallParamAnnotationIntersection,
+      checkedTargetOfGTy, checkedTargetOfGTy_eq_iff, checkedTargetOfGTy_if, hG, hH]

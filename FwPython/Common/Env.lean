@@ -51,6 +51,29 @@ theorem namedEnv_update_lookup_ne
       · rfl
       · exact ih
 
+/-- Updating an existing binding with the value it already has leaves the
+environment unchanged. -/
+theorem namedEnv_update_eq_self
+    {Γ : NamedEnv α} {x : Identifier} {S : α}
+    (hlook : Γ.lookup x = some S) :
+    Γ.update x S = Γ := by
+  induction Γ with
+  | nil =>
+      simp [NamedEnv.lookup] at hlook
+  | cons p rest ih =>
+      by_cases hpx : p.1 = x
+      · subst hpx
+        cases p with
+        | mk k v =>
+          simp [NamedEnv.update, NamedEnv.lookup] at hlook ⊢
+          cases hlook
+          rfl
+      · cases p with
+        | mk k v =>
+          have hlookRest : NamedEnv.lookup rest x = some S := by
+            simpa [NamedEnv.lookup, hpx] using hlook
+          simp [NamedEnv.update, hpx, ih hlookRest]
+
 /-- Updating twice at the same key keeps only the final update. -/
 theorem namedEnv_update_shadow
     {Γ : NamedEnv α} {x : Identifier} {S T : α} :

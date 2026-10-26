@@ -4,5 +4,8 @@ import FwPython.Common.Steps
 import FwPython.Common.Env
 import FwPython.Common.Heap
 import FwPython.Common.ClassModel
+import FwPython.Common.MRO.C3
 import FwPython.Common.MRO.Core
+import FwPython.Common.MRO.Compute
 import FwPython.Common.MRO.Properties
+import FwPython.Common.ListSubsets

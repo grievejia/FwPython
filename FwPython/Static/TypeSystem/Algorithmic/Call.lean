@@ -1,387 +1,189 @@
-import FwPython.Static.TypeSystem.Algorithmic.Lookup
-import FwPython.Static.Subtyping.Inversion
-import FwPython.Static.Subtyping.Completeness.Decision
+import FwPython.Static.TypeSystem.Typing
+import FwPython.Static.Subtyping.Decision
+import FwPython.Static.Subtyping.Equations
+import FwPython.Static.Subtyping.Normalization
+import FwPython.Static.Subtyping.SubtypeCheck
+import FwPython.Static.Subtyping.Lattice
+import FwPython.Common.ListSubsets
 
-/-! ## Algorithmic callable summaries -/
+/-! # Input and result types for call checking
 
-structure CertifiedCallableSummaries (ct : ClassTable) (sourceTy : Ty) where
-  elems : List (Ty × Ty)
-  wf : ∀ pr, pr ∈ elems → WellFormedTy ct pr.1 ∧ WellFormedTy ct pr.2
-  sound : ∀ pr, pr ∈ elems → IsSubtype ct sourceTy (.callable pr.1 pr.2)
+Each function requirement stores valid input and result types.
+The checker combines requirements to cover every statically accepted call.
+The package operations preserve validity while constructing these combinations.
+-/
 
-def bottomCallableSummary (_hwfct : WellFormedClassTable ct) : Ty × Ty :=
-  (.class_ objectClass, .bottom)
+open FwPython.Static.Subtyping
 
-theorem bottomCallableSummary_refines_any_callable
-    (hwfct : WellFormedClassTable ct) :
-    IsSubtype ct
-      (.callable (bottomCallableSummary hwfct).1 (bottomCallableSummary hwfct).2)
-      (.callable P R) := by
-  exact .callable .objectTop .bottom
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
 
-def unionFreeCallableSummaryCandidates
-    (hwfct : WellFormedClassTable ct) (S : Ty) (hwfS : WellFormedTy ct S)
-    (huf : S.unionFree) :
-    CertifiedCallableSummaries ct S :=
-  match analyzeDecisionCleanSource (ct := ct) (S := S) hwfct hwfS huf with
-  | .empty hsubBottom =>
-      { elems := [bottomCallableSummary hwfct]
-        wf := by
-          intro pr hpr
-          simp [bottomCallableSummary] at hpr
-          rcases hpr with rfl
-          exact ⟨wellFormed_object_type hwfct, .bottom⟩
+/-- Valid input and result pairs that cover every function requirement of the source. -/
+structure CallableSummaries {ct : ClassTable} (structural : WellFormedClassHierarchy ct)
+    (source : WellFormedType (ct.map ClassDecl.name)) where
+  /-- The input and result types considered by call checking. -/
+  requirements : List (WellFormedType (ct.map ClassDecl.name) × WellFormedType (ct.map ClassDecl.name))
+  /-- The source type lies below the function type described by each listed pair. -/
+  sound : ∀ pair ∈ requirements, IsSubtype structural source.raw (.callable pair.1.raw pair.2.raw)
+  /-- Every required function type has a pair covering its inputs with a result below the required result. -/
+  complete : ∀ P R, IsSubtype structural source.raw (.callable P R) →
+    ∃ pair, pair ∈ requirements ∧ IsSubtype structural P pair.1.raw ∧ IsSubtype structural pair.2.raw R
+
+/-- Transport callable requirements along an equation between their source types. -/
+private def CallableSummaries.ofEquation
+    (equation : TypeEquivalence structural.typeContext source target)
+    (summaries : CallableSummaries structural target) : CallableSummaries structural source where
+  requirements := summaries.requirements
+  sound := fun pair member => .trans (TypeEquivalence.toSubtype equation) (summaries.sound pair member)
+  complete := fun P R included => summaries.complete P R
+    (.trans (TypeEquivalence.toSubtype equation.symm) included)
+
+/-- The input and result annotations represented by the packaged requirements. -/
+def CallableSummaries.pairs (summaries : CallableSummaries structural source) : List (Ty × Ty) :=
+  summaries.requirements.map fun pair => (pair.1.raw, pair.2.raw)
+
+/-- Enumerate input and result pairs for a function intersection. The source is
+below each listed function type. For any function type above the source, a listed
+pair accepts all its required inputs and has a result below its required result type. -/
+private def functionSummaries (structural : WellFormedClassHierarchy ct)
+    (source : List (WellFormedType (ct.map ClassDecl.name) × WellFormedType (ct.map ClassDecl.name))) :
+    CallableSummaries structural (WellFormedType.functionIntersection structural.typeContext source) := by
+  let context := structural.typeContext
+  -- Union the subsets' input intersections and their result intersections separately.
+  let summarize (collection : List (List (WellFormedType context.names × WellFormedType context.names))) :
+      WellFormedType context.names × WellFormedType context.names :=
+    (.joinTypes (collection.map fun subset => .meetTypes context.valid.objectKnown (subset.map Prod.fst)),
+     .joinTypes (collection.map fun subset => .meetTypes context.valid.objectKnown (subset.map Prod.snd)))
+  refine
+    { requirements := (subsequences (nonemptySubsets source)).map summarize
+      sound := ?_
+      complete := ?_ }
+  · intro pair member
+    obtain ⟨collection, collectionMember, rfl⟩ := List.mem_map.mp member
+    apply subsetCollection_subtype context source collection (summarize collection).2
+    · exact fun subset member => (mem_subsequences.mp collectionMember).subset member
+    · exact fun subset member => subtype_joinTypes (List.mem_map.mpr ⟨subset, member, rfl⟩)
+  · intro P R included
+    let parameter : WellFormedType context.names := ⟨P, included.targetWellFormed.callable_param⟩
+    let result : WellFormedType context.names := ⟨R, included.targetWellFormed.callable_return⟩
+    let collection := subsetsWithResultBelow context source result
+    have collectionMember : collection ∈ subsequences (nonemptySubsets source) := by
+      dsimp only [collection]
+      rw [subsetsWithResultBelow_eq_filter]
+      exact mem_subsequences.mpr (List.filter_sublist ..)
+    refine ⟨summarize collection, List.mem_map.mpr ⟨collection, collectionMember, rfl⟩, ?_, ?_⟩
+    · simpa only [inputTypeForResult_eq_join] using
+        (functionIntersection_subtype_iff context source parameter result).mp included
+    · refine joinTypes_subtype (target := result) fun type member => ?_
+      obtain ⟨subset, subsetMember, rfl⟩ := List.mem_map.mp member
+      exact subsetsWithResultBelow_result_subtype context source result subset subsetMember
+
+/-- Intersect inputs and union results for two possible source alternatives. -/
+private def combineCallableSummaries
+    (left : CallableSummaries structural first) (right : CallableSummaries structural second) :
+    CallableSummaries structural (.union first second) where
+  requirements := left.requirements.flatMap fun l => right.requirements.map fun r =>
+    (.intersection l.1 r.1, .union l.2 r.2)
+  sound := by
+    intro pair member
+    obtain ⟨l, hl, r, hr, rfl⟩ := (by simpa using member :
+      ∃ l ∈ left.requirements, ∃ r ∈ right.requirements,
+        (.intersection l.1 r.1, .union l.2 r.2) = pair)
+    exact .unionElim
+      (.trans (left.sound l hl) (.callable
+        (.interLeft (.refl l.1.namesKnown) r.1.namesKnown)
+        (.unionLeft (.refl l.2.namesKnown) r.2.namesKnown)))
+      (.trans (right.sound r hr) (.callable
+        (.interRight (.refl r.1.namesKnown) l.1.namesKnown)
+        (.unionRight (.refl r.2.namesKnown) l.2.namesKnown)))
+  complete := by
+    intro P R included
+    obtain ⟨leftIncluded, rightIncluded⟩ := subtype_union_iff.mp included
+    obtain ⟨l, hl, ld, lr⟩ := left.complete P R leftIncluded
+    obtain ⟨r, hr, rd, rr⟩ := right.complete P R rightIncluded
+    exact ⟨(.intersection l.1 r.1, .union l.2 r.2),
+      List.mem_flatMap.mpr ⟨l, hl, List.mem_map.mpr ⟨r, hr, rfl⟩⟩,
+      .interIntro ld rd, .unionElim lr rr⟩
+
+/-- Combine summaries for produced intersections whose class conjunctions include BoundMethod. -/
+private def intersectionSummaries (structural : WellFormedClassHierarchy ct) :
+    (intersections : List (TypeIntersection structural.typeContext)) →
+    (∀ intersection ∈ intersections, intersection.classIntersection.includesClass boundMethodClass = true) →
+    CallableSummaries structural (.joinTypes (intersections.map TypeIntersection.toType))
+  | [], _ =>
+      { requirements := [((WellFormedTy.object structural).toType, .bottom)]
         sound := by
-          intro pr hpr
-          simp [bottomCallableSummary] at hpr
-          rcases hpr with rfl
-          exact .trans hsubBottom .bottom }
-  | .currentFromLeaf _ _ _ _ _ _ =>
-      { elems := []
-        wf := by intro pr hpr; cases hpr
-        sound := by intro pr hpr; cases hpr }
-  | .freshFromSeeds _ _ _ _ _ _ _ =>
-      { elems := []
-        wf := by intro pr hpr; cases hpr
-        sound := by intro pr hpr; cases hpr }
-  | .boundMethodFromCallables Psum Rsum hwfPsum hwfRsum _ _ _ hsub =>
-      { elems := [(Psum, Rsum)]
-        wf := by
-          intro pr hpr
-          simp at hpr
-          rcases hpr with rfl
-          exact ⟨hwfPsum, hwfRsum⟩
-        sound := by
-          intro pr hpr
-          simp at hpr
-          rcases hpr with rfl
-          simpa using hsub }
+          intro pair member
+          cases List.mem_singleton.mp member
+          exact .bottom (.callable (WellFormedTy.object structural) .bottom)
+        complete := fun _ _ included => ⟨_, List.mem_singleton.mpr rfl,
+          .objectTop included.targetWellFormed.callable_param, .bottom included.targetWellFormed.callable_return⟩ }
+  | intersection :: rest, included =>
+      combineCallableSummaries
+        (CallableSummaries.ofEquation
+          (intersection.functionIntersection_equation (included intersection List.mem_cons_self))
+          (functionSummaries structural intersection.functionTypes))
+        (intersectionSummaries structural rest
+          (fun intersection member => included intersection (List.mem_cons_of_mem _ member)))
 
-theorem unionFreeCallableSummaryCandidates_complete
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (huf : S.unionFree)
-    (hsubCallable : IsSubtype ct S (.callable P R)) :
-    ∃ pr,
-      pr ∈ (unionFreeCallableSummaryCandidates hwfct S hwfS huf).elems ∧
-        IsSubtype ct (.callable pr.1 pr.2) (.callable P R) := by
-  let hsem : SemSubtype ct S (.callable P R) := semSubtype_sound hsubCallable
-  cases hcase : analyzeDecisionCleanSource (ct := ct) (S := S) hwfct hwfS huf with
-  | empty hsubBottom =>
-      refine ⟨bottomCallableSummary hwfct, ?_, bottomCallableSummary_refines_any_callable (ct := ct) hwfct⟩
-      unfold unionFreeCallableSummaryCandidates
-      rw [hcase]
-      simp
-  | currentFromLeaf cname w hleaf hden hsub hrev =>
-      have hsem' : SemSubtype ct (.class_ cname) (.callable P R) :=
-        SemSubtype.trans (semSubtype_sound hrev) hsem
-      exact False.elim <|
-        not_semSubtype_class_callable (ct := ct) (.class_ w.hfind w.hmro) hsem'
-  | freshFromSeeds seeds hseeds_ne hseeds_nodup seedWitness seed_nonleaf seedSource hden =>
-      exact False.elim <|
-        freshSeedsObj_not_denotes_callable
-          (ct := ct) (P := P) (R := R)
-          seeds hseeds_ne hseeds_nodup seedWitness seed_nonleaf
-          (hsem _ hden)
-  | boundMethodFromCallables Psum Rsum hwfPsum hwfRsum _ _ hden hsub =>
-      refine ⟨(Psum, Rsum), ?_, ?_⟩
-      · unfold unionFreeCallableSummaryCandidates
-        rw [hcase]
-        simp
-      · have href :
-            IsSubtype ct (.callable Psum Rsum) (.callable P R) :=
-          callable_summary_intro (ct := ct) (P := P) (R := R)
-            (Psum := Psum) (Rsum := Rsum) hwfct (hsem _ hden)
-        exact href
+/-- Enumerate valid input/result pairs covering every `P -> R` with `source <: P -> R`.
+For one normalized intersection with m listed function requirements, enumeration
+builds 2^m - 1 nonempty subsets and then 2^(2^m - 1) collections of those subsets.
+These counts include repeated entries. A summary can combine several subsets.
+When those combined results are function types, retained repetitions and
+intersections formed during inference can make the next callee's function list
+larger. The next call enumerates all subsets and collections of that larger
+callee list before checking arguments. This enumeration can exhaust evaluation
+time or memory on repeated calls. -/
+def callableSummaries (structural : WellFormedClassHierarchy ct)
+    (source : WellFormedType (ct.map ClassDecl.name)) : CallableSummaries structural source := by
+  let context := structural.typeContext
+  match WellFormedType.subtypeDecidable structural source (WellFormedTy.boundMethod structural).toType with
+  | .isFalse rejected =>
+      exact { requirements := [], sound := by intro pair member; cases member
+              complete := by
+                intro P R included
+                exact (rejected (.trans included
+                  (.callableBoundMethod included.targetWellFormed.callable_param
+                    included.targetWellFormed.callable_return))).elim }
+  | .isTrue callable =>
+      let normalized := splitIntoIntersections context source
+      exact CallableSummaries.ofEquation normalized.equivalentToSource
+        (intersectionSummaries structural normalized.intersections
+          (classLiteral_includesClass_of_subtype context source boundMethodClass
+            context.valid.boundMethodKnown true callable))
 
-private theorem split_subtype_callable_inv
-    (split : SourceUnionSplit S)
-    (hsub : IsSubtype ct S (.callable P R)) :
-    IsSubtype ct split.left (.callable P R) ∧
-      IsSubtype ct split.right (.callable P R) := by
-  have hunion :
-      IsSubtype ct (.union split.left split.right) (.callable P R) :=
-    .trans split.fromUnion hsub
-  exact (subtype_union_iff (ct := ct) (T := split.left) (U := split.right) (V := .callable P R)).1 hunion
+/-- Results of listed requirements that accept at least one inferred argument type. -/
+def callResultsFromTy (structural : WellFormedClassHierarchy ct)
+    (callee : WellFormedType (ct.map ClassDecl.name))
+    (arguments : List (WellFormedType (ct.map ClassDecl.name))) : List (WellFormedType (ct.map ClassDecl.name)) :=
+  (callableSummaries structural callee).requirements.flatMap fun signature =>
+    arguments.flatMap fun argument =>
+      letI := WellFormedType.subtypeDecidable structural argument signature.1
+      if IsSubtype structural argument.raw signature.1.raw then [signature.2] else []
 
-private def crossCallableSummaryPairs
-    (left right : List (Ty × Ty)) : List (Ty × Ty) :=
-  left.flatMap fun pr1 =>
-    right.map fun pr2 =>
-      (.intersection pr1.1 pr2.1, .union pr1.2 pr2.2)
-
-private theorem mem_crossCallableSummaryPairs :
-    pr ∈ crossCallableSummaryPairs left right ↔
-      ∃ pr1, pr1 ∈ left ∧ ∃ pr2, pr2 ∈ right ∧
-        pr = (.intersection pr1.1 pr2.1, .union pr1.2 pr2.2) := by
-  constructor
-  · intro hpr
-    rw [crossCallableSummaryPairs] at hpr
-    rw [List.mem_flatMap] at hpr
-    rcases hpr with ⟨pr1, hpr1, hmem⟩
-    rw [List.mem_map] at hmem
-    rcases hmem with ⟨pr2, hpr2, hEq⟩
-    exact ⟨pr1, hpr1, pr2, hpr2, hEq.symm⟩
-  · rintro ⟨pr1, hpr1, pr2, hpr2, rfl⟩
-    rw [crossCallableSummaryPairs]
-    rw [List.mem_flatMap]
-    refine ⟨pr1, hpr1, ?_⟩
-    rw [List.mem_map]
-    exact ⟨pr2, hpr2, rfl⟩
-
-def callableSummaryCandidates
-    (hwfct : WellFormedClassTable ct) (S : Ty) (hwfS : WellFormedTy ct S) :
-    CertifiedCallableSummaries ct S :=
-  if huf : S.unionFree then
-    unionFreeCallableSummaryCandidates hwfct S hwfS huf
-  else
-    let split := splitNonUnionFree (T := S) huf
-    let left :=
-      callableSummaryCandidates hwfct split.left
-        (splitNonUnionFree_wf_left (ct := ct) (T := S) hwfS huf)
-    let right :=
-      callableSummaryCandidates hwfct split.right
-        (splitNonUnionFree_wf_right (ct := ct) (T := S) hwfS huf)
-    { elems := crossCallableSummaryPairs left.elems right.elems
-      wf := by
-        intro pr hpr
-        rcases (mem_crossCallableSummaryPairs.1 hpr) with ⟨pr1, hpr1, pr2, hpr2, rfl⟩
-        obtain ⟨hwfP1, hwfR1⟩ := left.wf pr1 hpr1
-        obtain ⟨hwfP2, hwfR2⟩ := right.wf pr2 hpr2
-        exact ⟨.intersection hwfP1 hwfP2, .union hwfR1 hwfR2⟩
-      sound := by
-        intro pr hpr
-        rcases (mem_crossCallableSummaryPairs.1 hpr) with ⟨pr1, hpr1, pr2, hpr2, rfl⟩
-        have hleft :
-            IsSubtype ct split.left (.callable pr1.1 pr1.2) :=
-          left.sound pr1 hpr1
-        have hright :
-            IsSubtype ct split.right (.callable pr2.1 pr2.2) :=
-          right.sound pr2 hpr2
-        have hunion :
-            IsSubtype ct
-              (.union split.left split.right)
-              (.union (.callable pr1.1 pr1.2) (.callable pr2.1 pr2.2)) :=
-          .unionElim
-            (.trans hleft (.unionLeft .refl))
-            (.trans hright (.unionRight .refl))
-        exact .trans split.toUnion <|
-          .trans hunion <|
-            subtype_union_callable_summary
-              (ct := ct)
-              (p1 := pr1.1) (r1 := pr1.2)
-              (p2 := pr2.1) (r2 := pr2.2) }
-termination_by S.size
-decreasing_by
-  all_goals
-    simp_wf
-    first
-    | simpa using (splitNonUnionFree (T := S) huf).left_lt
-    | simpa using (splitNonUnionFree (T := S) huf).right_lt
-
-private def callableSummaryCandidates_complete_aux
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (hsubCallable : IsSubtype ct S (.callable P R)) :
-    ∃ pr,
-      pr ∈ (callableSummaryCandidates hwfct S hwfS).elems ∧
-        IsSubtype ct (.callable pr.1 pr.2) (.callable P R) := by
-  by_cases huf : S.unionFree
-  · unfold callableSummaryCandidates
-    rw [dif_pos huf]
-    exact
-      unionFreeCallableSummaryCandidates_complete
-        (ct := ct) (S := S) (P := P) (R := R)
-        hwfct hwfS huf hsubCallable
-  · let split := splitNonUnionFree (T := S) huf
-    let hwfL := splitNonUnionFree_wf_left (ct := ct) (T := S) hwfS huf
-    let hwfR := splitNonUnionFree_wf_right (ct := ct) (T := S) hwfS huf
-    have hsplit := split_subtype_callable_inv (ct := ct) (S := S) (P := P) (R := R) split hsubCallable
-    obtain ⟨pr1, hpr1, href1⟩ :=
-      callableSummaryCandidates_complete_aux
-        (ct := ct) (S := split.left) (P := P) (R := R) hwfct hwfL hsplit.1
-    obtain ⟨pr2, hpr2, href2⟩ :=
-      callableSummaryCandidates_complete_aux
-        (ct := ct) (S := split.right) (P := P) (R := R) hwfct hwfR hsplit.2
-    have hinv1 :=
-      callable_subtype_inv
-        (ct := ct)
-        (hBMFind := hwfct.boundMethodExists.hfind)
-        (hBMMro := hwfct.boundMethodExists.hmro)
-        href1
-    have hinv2 :=
-      callable_subtype_inv
-        (ct := ct)
-        (hBMFind := hwfct.boundMethodExists.hfind)
-        (hBMMro := hwfct.boundMethodExists.hmro)
-        href2
-    refine ⟨(.intersection pr1.1 pr2.1, .union pr1.2 pr2.2), ?_, ?_⟩
-    · have hmem :
-          (.intersection pr1.1 pr2.1, .union pr1.2 pr2.2) ∈
-            crossCallableSummaryPairs
-              (callableSummaryCandidates hwfct split.left hwfL).elems
-              (callableSummaryCandidates hwfct split.right hwfR).elems :=
-        (mem_crossCallableSummaryPairs.2 ⟨pr1, hpr1, pr2, hpr2, rfl⟩)
-      unfold callableSummaryCandidates
-      rw [dif_neg huf]
-      simpa [split, hwfL, hwfR] using hmem
-    · exact .callable
-        (.interIntro hinv1.1 hinv2.1)
-        (.unionElim hinv1.2 hinv2.2)
-termination_by S.size
-decreasing_by
-  all_goals
-    simp_wf
-    first
-    | simpa using (splitNonUnionFree (T := S) huf).left_lt
-    | simpa using (splitNonUnionFree (T := S) huf).right_lt
-
-theorem callableSummaryCandidates_complete
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (hsubCallable : IsSubtype ct S (.callable P R)) :
-    ∃ pr,
-      pr ∈ (callableSummaryCandidates hwfct S hwfS).elems ∧
-        IsSubtype ct (.callable pr.1 pr.2) (.callable P R) :=
-  callableSummaryCandidates_complete_aux hwfct hwfS hsubCallable
-
-def callableSummaryBasis
-    (hwfct : WellFormedClassTable ct) (S : Ty) (hwfS : WellFormedTy ct S) :
-    List (Ty × Ty) :=
-  (callableSummaryCandidates hwfct S hwfS).elems
-
-theorem callableSummaryBasis_member_subtype
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (hmem : pr ∈ callableSummaryBasis hwfct S hwfS) :
-    IsSubtype ct S (.callable pr.1 pr.2) :=
-  (callableSummaryCandidates hwfct S hwfS).sound pr hmem
-
-theorem callableSummaryBasis_member_wellFormed
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (hmem : pr ∈ callableSummaryBasis hwfct S hwfS) :
-    WellFormedTy ct pr.1 ∧ WellFormedTy ct pr.2 :=
-  (callableSummaryCandidates hwfct S hwfS).wf pr hmem
-
-theorem callableSummaryBasis_complete
-    (hwfct : WellFormedClassTable ct) (hwfS : WellFormedTy ct S)
-    (hsubCallable : IsSubtype ct S (.callable P R)) :
-    ∃ pr,
-      pr ∈ callableSummaryBasis hwfct S hwfS ∧
-        IsSubtype ct (.callable pr.1 pr.2) (.callable P R) :=
-  callableSummaryCandidates_complete hwfct hwfS hsubCallable
-
-private def callResultsFromEntry
-    (hwfct : WellFormedClassTable ct)
-    (calleeTy : Ty) (hwfCallee : WellFormedTy ct calleeTy)
-    (argBasis : List Ty)
-    (hArgWf : ∀ A, A ∈ argBasis → WellFormedTy ct A)
-    (entry : { pr // pr ∈ callableSummaryBasis hwfct calleeTy hwfCallee }) : List Ty := by
-  let paramTy := entry.1.1
-  let resultTy := entry.1.2
-  let hwfParam :=
-    (callableSummaryBasis_member_wellFormed
-      (hwfct := hwfct) (S := calleeTy) (hwfS := hwfCallee) entry.2).1
-  exact argBasis.attach.flatMap fun argEntry =>
-    let argTy := argEntry.1
-    let _ : Decidable (IsSubtype ct argTy paramTy) :=
-      isSubtype_decidable (ct := ct) (T := argTy) (U := paramTy)
-        hwfct (hArgWf argTy argEntry.2) hwfParam
-    if hsub : IsSubtype ct argTy paramTy then [resultTy] else []
-
-private theorem callResultsFromEntry_member_witness
-    (hwfct : WellFormedClassTable ct)
-    (entry : { pr // pr ∈ callableSummaryBasis hwfct calleeTy hwfCallee })
-    (hmem : R ∈
-      callResultsFromEntry hwfct calleeTy hwfCallee argBasis hArgWf entry) :
-    ∃ A, A ∈ argBasis ∧ IsSubtype ct A entry.1.1 ∧ entry.1.2 = R := by
-  unfold callResultsFromEntry at hmem
-  simp at hmem
-  rcases hmem with ⟨⟨A, hA, hsub⟩, hEq⟩
-  exact ⟨A, hA, hsub, hEq.symm⟩
-
-private theorem callResultsFromEntry_mem_of_accepts
-    (hwfct : WellFormedClassTable ct)
-    (entry : { pr // pr ∈ callableSummaryBasis hwfct calleeTy hwfCallee })
-    (hA : A ∈ argBasis)
-    (hsub : IsSubtype ct A entry.1.1) :
-    entry.1.2 ∈
-      callResultsFromEntry hwfct calleeTy hwfCallee argBasis hArgWf entry := by
-  unfold callResultsFromEntry
-  rw [List.mem_flatMap]
-  refine ⟨⟨A, hA⟩, by simp, ?_⟩
-  simp [hsub]
-
-def callResultsFromTy
-    (hwfct : WellFormedClassTable ct) (calleeTy : Ty)
-    (hwfCallee : WellFormedTy ct calleeTy)
-    (argBasis : List Ty)
-    (hArgWf : ∀ A, A ∈ argBasis → WellFormedTy ct A) : List Ty :=
-  (callableSummaryBasis hwfct calleeTy hwfCallee).attach.flatMap
-    (callResultsFromEntry hwfct calleeTy hwfCallee argBasis hArgWf)
-
-theorem callResultsFromTy_member_witness
-    (hwfct : WellFormedClassTable ct)
-    (hmem : R ∈ callResultsFromTy hwfct calleeTy hwfCallee argBasis hArgWf) :
-    ∃ A P,
-      A ∈ argBasis ∧
-        (P, R) ∈ callableSummaryBasis hwfct calleeTy hwfCallee ∧
-        IsSubtype ct A P := by
-  unfold callResultsFromTy at hmem
-  rw [List.mem_flatMap] at hmem
-  rcases hmem with ⟨entry, _, hmemEntry⟩
-  rcases entry with ⟨⟨P, R'⟩, hentry⟩
-  obtain ⟨A, hA, hsub, hEq⟩ :=
-    callResultsFromEntry_member_witness
-      (hwfct := hwfct) (calleeTy := calleeTy) (hwfCallee := hwfCallee)
-      (argBasis := argBasis) (hArgWf := hArgWf)
-      (entry := ⟨(P, R'), hentry⟩) hmemEntry
-  cases hEq
-  exact ⟨A, P, hA, hentry, hsub⟩
-
+/-- Every enumerated result has a typed callee requirement and an accepted argument. -/
 theorem callResultsFromTy_sound
-    (hwfct : WellFormedClassTable ct)
-    (hmem : R ∈ callResultsFromTy hwfct calleeTy hwfCallee argBasis hArgWf)
-    (hcallee : HasType ct Γ callee calleeTy)
-    (harg : ∀ A, A ∈ argBasis → HasType ct Γ arg A) :
-    HasType ct Γ (.call callee arg) R := by
-  obtain ⟨A, P, hA, hsummaryMem, hsubArg⟩ :=
-    callResultsFromTy_member_witness
-      (hwfct := hwfct) (calleeTy := calleeTy) (hwfCallee := hwfCallee)
-      (argBasis := argBasis) (hArgWf := hArgWf) hmem
-  have hsummarySubtype :
-      IsSubtype ct calleeTy (.callable P R) :=
-    callableSummaryBasis_member_subtype
-      (hwfct := hwfct) (S := calleeTy) (hwfS := hwfCallee) hsummaryMem
-  have hsummaryWf :
-      WellFormedTy ct P ∧ WellFormedTy ct R :=
-    callableSummaryBasis_member_wellFormed
-      (hwfct := hwfct) (S := calleeTy) (hwfS := hwfCallee) hsummaryMem
-  have hcalleeCallable :
-      HasType ct Γ callee (.callable P R) :=
-    .sub hcallee hsummarySubtype (.callable hsummaryWf.1 hsummaryWf.2)
-  exact .call hcalleeCallable (harg A hA) hsubArg
+    (callee : WellFormedType (ct.map ClassDecl.name))
+    (hmem : result ∈ callResultsFromTy structural callee arguments)
+    (hcallee : HasType structural Γ expression callee.raw)
+    (harg : ∀ argument ∈ arguments, HasType structural Γ arg argument.raw) :
+    HasType structural Γ (.call expression arg) result.raw := by
+  simp only [callResultsFromTy, List.mem_flatMap] at hmem
+  obtain ⟨signature, hs, argument, ha, accepted⟩ := hmem
+  haveI := WellFormedType.subtypeDecidable structural argument signature.1
+  split at accepted
+  · rename_i included
+    cases List.mem_singleton.mp accepted
+    exact .call (.sub hcallee ((callableSummaries structural callee).sound signature hs)) (harg argument ha) included
+  · cases accepted
 
+/-- Every declarative call has an enumerated result below its required result. -/
 theorem callResultsFromTy_complete
-    (hwfct : WellFormedClassTable ct)
-    (hsubCallable : IsSubtype ct calleeTy (.callable P R))
-    (hA : A ∈ argBasis)
-    (hsubArg : IsSubtype ct A P) :
-    ∃ R',
-      R' ∈ callResultsFromTy hwfct calleeTy hwfCallee argBasis hArgWf ∧
-        IsSubtype ct R' R := by
-  obtain ⟨pr, hpr, href⟩ :=
-    callableSummaryBasis_complete
-      (ct := ct) (S := calleeTy) (P := P) (R := R)
-      hwfct hwfCallee hsubCallable
-  have hinv :=
-    callable_subtype_inv
-      (ct := ct)
-      (hBMFind := hwfct.boundMethodExists.hfind)
-      (hBMMro := hwfct.boundMethodExists.hmro)
-      href
-  have hsubArg' : IsSubtype ct A pr.1 := .trans hsubArg hinv.1
-  refine ⟨pr.2, ?_, hinv.2⟩
-  unfold callResultsFromTy
-  rw [List.mem_flatMap]
-  refine ⟨⟨pr, hpr⟩, by simp, ?_⟩
-  exact callResultsFromEntry_mem_of_accepts
-    (hwfct := hwfct) (calleeTy := calleeTy) (hwfCallee := hwfCallee)
-    (argBasis := argBasis) (hArgWf := hArgWf)
-    (entry := ⟨pr, hpr⟩) hA hsubArg'
+    (callee : WellFormedType (ct.map ClassDecl.name))
+    (hcallee : IsSubtype structural callee.raw (.callable P R))
+    (hA : argument ∈ arguments) (harg : IsSubtype structural argument.raw P) :
+    ∃ result, result ∈ callResultsFromTy structural callee arguments ∧ IsSubtype structural result.raw R := by
+  obtain ⟨signature, hs, inputSubtype, resultSubtype⟩ := (callableSummaries structural callee).complete P R hcallee
+  have accepted : IsSubtype structural argument.raw signature.1.raw := .trans harg inputSubtype
+  refine ⟨signature.2, List.mem_flatMap.mpr ⟨signature, hs, List.mem_flatMap.mpr ⟨argument, hA, ?_⟩⟩, resultSubtype⟩
+  simp [accepted]

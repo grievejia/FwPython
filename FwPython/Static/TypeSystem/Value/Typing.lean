@@ -4,36 +4,34 @@ import FwPython.Static.Semantics.Core
 
 /-! ## Value typing -/
 
-/-- `ValueHasType ct h v T` — runtime value `v` has type `T` under
-    class table `ct` and heap `h`. -/
-inductive ValueHasType : ClassTable → Heap → Value → Ty → Prop where
+/-- Runtime value `v` has type `T` in heap `h`.
+All subtype comparisons use the supplied hierarchy. -/
+inductive ValueHasType {ct : ClassTable} (structural : WellFormedClassHierarchy ct) : Heap → Value → Ty → Prop where
   /-- An object reference has class type when the heap maps its OID to
       a class that is a subtype of the target class. -/
   | objRef :
       h.lookup oid = some obj →
-      IsSubtype ct (.class_ obj.className) (.class_ cname) →
-      ValueHasType ct h (.objRef oid) (.class_ cname)
+      IsSubtype structural (.class_ obj.className) (.class_ cname) →
+      ValueHasType structural h (.objRef oid) (.class_ cname)
   /-- An object reference has callable type when its heap payload is a
-      bound method with compatible signature. -/
+      bound method with its declared signature. The heap invariant supplies
+      the receiver lookup and method origin. -/
   | objRefCallable :
       h.lookup oid = some ⟨bmClass, .boundMethod recvOid m⟩ →
-      h.lookup recvOid = some recvObj →
-      MethodInReceiverMro ct recvObj.className m →
-      ValueHasType ct h (.objRef oid) (.callable m.paramTy m.returnTy)
-  /-- Subsumption: a value of type T also has type U when T <: U
-      (target must be well-formed). -/
+      ValueHasType structural h (.objRef oid) (.callable m.paramTy m.returnTy)
+  /-- A value retains its typing at a supertype.
+      The subtype proof establishes validity of both types. -/
   | sub :
-      ValueHasType ct h v T →
-      IsSubtype ct T U →
-      WellFormedTy ct U →
-      ValueHasType ct h v U
+      ValueHasType structural h v T →
+      IsSubtype structural T U →
+      ValueHasType structural h v U
   /-- Runtime intersection introduction: a value that has both types
       has the intersection type. -/
   | interIntro :
-      ValueHasType ct h v T →
-      ValueHasType ct h v U →
+      ValueHasType structural h v T →
+      ValueHasType structural h v U →
       WellFormedTy ct (.intersection T U) →
-      ValueHasType ct h v (.intersection T U)
+      ValueHasType structural h v (.intersection T U)
   /-- An object reference has `negClass C` when its runtime class has a
       deterministic MRO that excludes `C`. The `WellFormedTy` premise
       certifies the target class atom; well-formedness of the runtime
@@ -44,14 +42,15 @@ inductive ValueHasType : ClassTable → Heap → Value → Ty → Prop where
       findClass ct obj.className = some cls →
       ComputeMro ct cls mro →
       C ∉ mro →
-      ValueHasType ct h (.objRef oid) (.negClass C)
+      ValueHasType structural h (.objRef oid) (.negClass C)
 
 /-! ## Environment typing -/
 
-/-- The runtime environment is well-typed w.r.t. the type environment. -/
-def EnvHasType (ct : ClassTable) (h : Heap) (env : Env) (Γ : TyEnv) : Prop :=
+/-- Each variable in the type environment names a runtime value with that type.
+The value typings use the same hierarchy and heap. -/
+def EnvHasType {ct : ClassTable} (structural : WellFormedClassHierarchy ct) (h : Heap) (env : Env) (Γ : TyEnv) : Prop :=
   ∀ x T, Γ.lookup x = some T →
-    ∃ v, env.lookup x = some v ∧ ValueHasType ct h v T
+    ∃ v, env.lookup x = some v ∧ ValueHasType structural h v T
 
 /-- Every type in the environment is well-formed. -/
 def WellFormedTyEnv (ct : ClassTable) (Γ : TyEnv) : Prop :=

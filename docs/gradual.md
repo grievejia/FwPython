@@ -1,747 +1,365 @@
-# Gradual Typing in FwPython
+# Gradual typing
 
-Checked runtime values are only object references. Callable enforcement
-is shallow. Higher-order mediation happens through compiled call
-structure plus method-entry and method-exit enforcement.
+This document explains how FwPython combines known and unknown type information.
+It follows a source call through type inference, compilation, runtime checks,
+and the safety guarantees. The [static design](type_system.md) supplies the
+type equations and inheritance rules used here.
 
-## Overview
+## Why unknown types need runtime checks
 
-The gradual development is organized as a translation-and-proof pipeline:
+Suppose a bound method f returns its Bool argument, but x has unknown type:
 
 ```text
-gradual source program
-  -- semantic/source reasoning via MoreStatic, BoundaryPrecision,
-     ProgramAnnotationPrecision, and SemanticSourceEnvPrecision
-  -- same-skeleton program transport via ProgramTargetPrecision
-  -- use-site elaboration via compileCheck
-explicit checked-target program
-  -- normalized CheckedTarget annotations
-  -- explicit enforce / dynAttrAccess / call-return labels
-checked continuation machine
-  -- checked/runtime precision on expressions, frames, states, and outcomes
-  -- DGG-only elaboration/provenance wrapper ElaboratedStatePrecision
-derived end-to-end theorems
-  -- soundness
-  -- blame correctness + unique blame origins
-  -- one static gradual guarantee
-  -- one dynamic gradual guarantee
+f: Bool -> Bool
+x: any
+f(x)
 ```
 
-For well-typed elaborated programs, the checked machine can finish in
-only two intended ways:
-
-- success with a value witnessing the expected gradual type
-- blame at one of the boundaries inserted by compilation
-
-The checked machine has a `runtimeError` constructor for engineering
-convenience; the soundness theorem rules it out for compiled well-typed
-executions.
-
-## Why a Checked Target Exists
-
-A direct metatheory on the surface gradual language would have to mix source
-typing, implicit dynamic checks, blame assignment, runtime mediation, and
-environment refinement in one operational model. The checked target separates
-those concerns. Source typing determines where dynamic obligations arise,
-`compileCheck` inserts them explicitly, and the safety proof is then carried
-out on a smaller machine whose control states say exactly which boundary is
-being checked and which labels own the potential blame. This is why the gradual
-development is presented as elaboration plus checked-runtime soundness rather
-than as a single ad hoc source-language evaluator.
-
-## Source Layer
-
-The source language is what the programmer writes. Its type language
-`GTy` contains:
-
-- class types
-- callable types
-- `any`
-- unions and intersections
-- class-only negation (`negClass C`)
-- `bottom`
-
-Source typing is expressed by `GSrcInfer`. It is:
-
-- deterministic
-- single-type per binding
-- source-level, not machine-level
-
-Checked approximations are not stored in source environments. They are
-chosen later at elaboration sites.
-
-The source-facing theorem layer is deliberately semantic.
-
-- `MoreStatic` is the basic source-annotation relation.
-- `BoundaryPrecision` is the semantic relation on compiled boundary meanings.
-- `ProgramAnnotationPrecision` is the same-skeleton source-program relation
-  whose fields vary only by `MoreStatic`.
-- `SemanticSourceEnvPrecision` is the same-binding-name environment relation
-  with pointwise `MoreStatic`.
-
-The public static/DGG entry points also use two narrower structural relations.
-
-- `ProgramTargetPrecision` is the same-skeleton program relation stated through
-  explicit checked-target images of method annotations.
-- `ProgramRootTargetInputPrecision` is the surviving root-only structural
-  premise for the top-level expected target. It is intentionally separate from
-  program precision.
-
-Operational source reasoning still uses:
-
-- `GradualSubtype` for one-way widening
-- `AssignableTo` for assignment-like compatibility, especially calls and
-  conditionals
+The source checker permits this call. If x is TRUE, the call can return TRUE.
+If x is NONE, the method's parameter check fails before its body runs.
+The failure report identifies the method's Bool parameter requirement.
+FwPython calls this report *blame*.
 
-The single-type front end is intentionally safe-domain-directed:
+The annotation `any` represents unknown type information. It differs from
+Object, which is a known static type containing every object.
+An Object annotation alone cannot meet a Bool input requirement.
+An `any` annotation permits a check to establish whether the actual value is Bool.
+
+The source language has the static type forms plus `any`.
+Union means alternative types; intersection means simultaneous requirements.
+A function type `P -> R` specifies input and result requirements, but gradual
+execution can report blame when a runtime check rejects a value.
 
-- attribute access uses the partial source summary `attrSourceTy?`
-- call typing uses `calleeSummarySrc` and `callSourceTy?`
-- conditionals require a boolean-safe domain
-- `any` can supply dynamic behavior where the front end allows it, but
-  it does not magically rescue a failing union arm
+## From source types to checked execution
 
-The source summaries are intentionally asymmetric across unions and
-intersections.
+A program passes through three stages:
+
+1. Source inference assigns a type to each expression.
+2. Compilation uses those types and the requirements of surrounding expressions to insert checks.
+3. The checked runtime evaluates the compiled program and reports any failed requirement.
+
+The source type describes the information inferred for an expression.
+The *expected type* describes what the surrounding expression needs.
+These types can differ. For example, a value inferred as `any` can occur where
+Bool is expected; compilation inserts the Bool check.
 
-- attribute lookup on a union succeeds if either branch finds the attribute and
-  returns the union of the successful results
-- attribute lookup on an intersection keeps a surviving branch if exactly one
-  side finds the attribute and returns an intersection only when both sides
-  succeed
-- call typing on a union succeeds only when both branches accept the argument
-- call typing on an intersection keeps the unique successful branch and
-  collapses two simultaneous successes to `.any`
+All runtime values are object references. A bound method stores its selected
+method and receiver. Method selection follows the *method resolution order*
+(MRO), the ordered list of a class and its ancestors.
 
-The front end is deliberately separate from checked elaboration:
+Gradual type comparisons use the static inheritance facts. Erasure replaces
+method annotations and bodies but preserves class names and MROs.
+`WellFormedGClassTableCore.toWellFormedClassHierarchy` provides that static
+hierarchy for subtype comparisons. This works because those comparisons need
+inheritance information before they need method body typing.
+
+## Decide which source calls to permit
 
-- source environments track only source types
-- checked environments appear only after elaboration
-- checked targets are introduced only through `approxTarget`,
-  `callParamTarget`, and `compileCheck`
+The checker must permit calls that can need runtime checks while retaining
+known result information for later expressions.
+The call in the first example illustrates both requirements:
+x needs a Bool check, but f's declared Bool result remains useful.
 
-Call-site parameter targets are also normalized before they reach the checked
-layer. `callParamTarget` and `callParamCheckedTarget` absorb `.any`,
-propagate `.bottom`, remove duplicates, and canonicalize the order of
-non-collapsed intersections so the compile/runtime proofs compare a stable
-checked-target image.
+### Approximate unknown information with two bounds
 
-### Why The Source Layer Stays Single-Type
+To interpret the uncertainty in an annotation, consider replacing each
+occurrence of `any` independently with a static type. For example,
+`any -> Bool` can become `Bool -> Bool` or `NoneType -> Bool`.
+These replacements are called *materializations*.
 
-`GSrcInfer` assigns one source type per expression because the source layer is
-supposed to explain what the programmer wrote, not to precompute every checked
-approximation the runtime might later need. If checked approximations were
-threaded through source environments, every source theorem would have to talk
-about machine-facing artifacts such as call-site targets and boundary
-approximations. By choosing those only at elaboration sites, FwPython keeps the
-source typing judgment deterministic and compact while still allowing the
-checked compiler to insert the exact boundaries required at each use.
+The checker uses a lower bound and an upper bound in the static subtype order.
+The lower bound is below the possible replacements; the upper bound is above them.
+Together they describe an *interval*, meaning the static types between the bounds:
 
-### Why Negation Stays Class-Only
+```text
+lowerBound G <: T <: upperBound G
+```
 
-The source language inherits class-only negation (`negClass C`) from the
-static side rather than introducing a general `negation T`. The
-justification is open-world soundness, and it carries over unchanged to
-the gradual layer: only sealed built-in classes admit primitive global
-exclusion, and `negClass C` records exactly the runtime fact the heap
-can witness. The gradual layer adds no separate negation machinery; it
-simply reuses what the static side already justified.
+The Lean relation `MaterializesTo` tests this interval membership.
+The interval is an approximation of independent replacements, not an exact
+enumeration of them.
 
-## Checked Target
+| Annotation | Lower bound | Upper bound |
+| --- | --- | --- |
+| `Bool` | `Bool` | `Bool` |
+| `any` | `bottom` | `Object` |
+| `any & Bool` | `bottom` | `Bool` |
+| `any -> Bool` | `Object -> Bool` | `bottom -> Bool` |
+
+Function inputs reverse the bound direction because input subtyping reverses.
+The last interval admits `Bool -> Object`, although replacing the unknown input
+of `any -> Bool` always keeps a Bool result. This example shows why result
+selection also needs the original function annotations.
 
-The checked/runtime layer stores explicit checked-target syntax:
+### Use the lower bounds for call acceptance
 
-- `CheckedTarget`
-- `interpTarget`
-- `compileBoundaryTarget`
-- `coreNormalizeCheckedTarget`
+For valid callee annotation C and argument annotation A, the source call is
+accepted exactly when:
 
-`coreNormalizeCheckedTarget` is the only load-bearing normalizer for
-machine-facing target syntax. `RuntimePublicCheckedTargetShape` means that a
-checked target is already a fixpoint of that normalizer. There is no checked
-target analogue of `runtimePublicTy`; the old raw helper survives only as the
-identity on `GTy` for compatibility outside the checked-target metatheory.
+```text
+lowerBound C <: (lowerBound A -> Object)
+```
 
-The checked target makes every dynamic obligation explicit in the syntax.
-Its key forms are:
+Object leaves the result unrestricted during this acceptance check.
+The result is selected in a separate step.
 
-- `enforce e target labels`
-- `dynAttrAccess e attrName ℓ`
-- `call callee arg paramTy returnTy returnLabels`
+For `Bool -> Bool` called with `any`, the argument lower bound is bottom.
+The subtype comparison accepts the call, and runtime checking decides whether
+the actual argument is Bool.
 
-`compileCheck` inserts these forms from a source typing derivation plus an
-explicit expected target `P`. Checked syntax, checked frames, and checked
-methods carry explicit `CheckedTarget` annotations, and boundary-label payloads
-are indexed directly by `BoundaryLabels (compileBoundaryTarget target)`.
+The full callee annotation matters. `Bool | (Bool -> Bool)` called on Bool is
+rejected because the callee might be a noncallable Bool value.
+Knowing only that a value has class BoundMethod also gives no guarantee that
+it accepts Bool. A BoundMethod call with an `any` argument can be accepted,
+but its result is unknown and its actual input is checked at runtime.
+
+The acceptance theorem proves agreement with this bounds comparison.
+It does not characterize all independent replacements of `any`.
 
-Three details matter for the current semantics.
+## Keep the result information needed by later calls
 
-### Calls carry explicit checked targets and return-boundary labels
+For an accepted call on one function annotation `P -> R`, inference keeps R.
+Thus, the first example gives a Bool result even though its argument is `any`.
+A later call requiring NoneType rejects that result during source checking.
+Unknown input information alone does not erase an explicit result annotation.
 
-The checked `call` node stores:
+Intersections require more care because one function must satisfy several rules:
 
-- the caller-side expected parameter target
-- the caller-side expected return target
-- the boundary-label tree for the call-site return check
+```text
+f: (Bool -> Bool) & (NoneType -> NoneType)
+```
 
-This is how the runtime remembers where return-side blame should be
-attributed after a method body finishes.
+| Argument type | Selected result | Reason |
+| --- | --- | --- |
+| `Bool` | `Bool` | The Bool requirement applies. |
+| `NoneType` | `NoneType` | The NoneType requirement applies. |
+| `Bool \| NoneType` | `Bool \| NoneType` | Both requirements together cover the input alternatives. |
+| `Bool & NoneType` | `Bool & NoneType` | Both requirements apply; this input cannot return a value. |
 
-### Dynamic failure is turned into blame
+A union of functions has a different meaning: the callee can be either
+function. The input must work for each alternative, and the result can come
+from either one.
 
-Operations that are dynamically allowed because of `any` are compiled
-into checked forms that blame instead of exposing unchecked failure.
+### An unknown argument can select different results
 
-In particular:
+Consider a variable with these requirements:
 
-- dynamic attribute access becomes `dynAttrAccess`
-- missing dynamic attributes blame the stored label
-- source calls elaborate through explicit callable expectations
+```text
+f: (Object -> Bool | NoneType) & (Bool -> NoneType)
+x: any
+consume: NoneType -> Bool
+```
 
-The checked machine contains raw runtime errors for untyped or
-malformed executions; those are outside the intended semantics of
-compiled well-typed programs.
+A Bool argument meets both inputs, so the result must be NoneType.
+A NoneType argument meets only the Object input, so its result can be
+Bool or NoneType.
 
-### Checked precision is split
+Since x is `any`, the source result must account for both cases.
+That uncertainty permits `consume(f(x))` to pass the source check.
+If f actually returns Bool, consume's parameter check reports blame.
 
-The runtime precision layer is constructor-directed on checked syntax and uses
-semantic information only where the machine itself needs it. The main relations
-are:
+### Represent several possible results
 
-- `CheckedTargetPrecision`
-- `CompileTargetPrecision`
-- `CheckedProgramPrecision`
-- `CheckedStatePrecision`
-- `CheckedOutcomePrecision`
+For two static case results X and Y, the checker uses:
 
-`CheckedTargetPrecision` is diagonal on runtime-public checked-target shape:
-it matches constructors rather than building semantic widenings such as
-"callable below any" into the machine relation. Semantic widening lives in
-`MoreStatic` after interpreting the checked target.
+```text
+(X & Y) | (any & (X | Y))
+```
 
-`CompileTargetPrecision` is the slightly larger structural relation used for
-compile-generated payloads such as normalized call-parameter targets. It keeps
-the checked/runtime simulation syntactic while admitting the absorption facts
-introduced by source-side call-parameter normalization.
+Its lower bound is `X & Y`; its upper bound is `X | Y`.
+These are the tightest bounds that include both results.
 
-### Why Dynamic Uncertainty Becomes Blame
+In the preceding example, X is NoneType and Y is `Bool | NoneType`.
+The result therefore has lower bound NoneType and upper bound `Bool | NoneType`.
+The lower bound permits the later NoneType call; the runtime checks enforce its
+requirement on the actual value.
 
-FwPython treats uncertainty introduced by `any` as a boundary issue rather than
-as an unchecked runtime hazard. That is why dynamic attribute access elaborates
-to `dynAttrAccess`, why missing dynamic attributes blame an inserted label, and
-why source calls elaborate through explicit callable expectations even when the
-callee is only known through `any`. The alternative would be to let the runtime
-fall through to raw machine errors for operations that the source language
-admitted dynamically. That would make blame incomplete as an account of dynamic
-failure and would break the end-to-end theorem that well-typed elaborated
-programs finish in witnessed success or blame.
+This representation can admit extra static types between its bounds.
+For example, an interval that includes Bool and Object also includes
+`Bool | NoneType`. The approximation can therefore lose information.
+When all cases give the same result, the checker keeps that result without
+adding an unknown part.
 
-## Checked Runtime
+For gradual case results, the same construction intersects their lower bounds
+and unions their upper bounds. An unknown part of the callee can also impose
+unknown result requirements. For example, `any & (Dog -> Dog)` can have a result
+more specific than Dog. This differs from `any -> Dog`, which explicitly fixes
+the result to Dog.
 
-The checked runtime is a small-step continuation machine over an
-explicit heap.
+### Preserve unknown inputs in returned functions
 
-### Values and heap objects
+Bounds can also hide information needed by a second call:
 
-Checked runtime values are only:
+```text
+f: (Bool -> (any -> Bool)) & (NoneType -> (Bool -> Object))
+x: any
+```
 
-- `CheckedValue.objRef oid`
+If x is replaced with NoneType, the first call selects `Bool -> Object`.
+If x is replaced with Bool, it selects `any -> Bool`.
+Keeping only the latter type would lose the Object result possible on a later
+Bool call.
 
-Checked heap objects are:
+The selector therefore keeps distinct result requirements when either contains
+an unknown function input. Equal results remain unchanged.
+This rule retains information that bounds alone can hide, but the combined
+approximation can still lose precision in later calls.
+Exact result selection for all independent replacements is not proved.
 
-- ordinary objects
-- bound-method objects carrying a receiver OID and a checked method
+An empty callee type gives result bottom because no callee value can reach the
+call. Empty union alternatives add no possible result.
+An accepted call with no selected result uses bottom for an empty argument
+upper bound and `any` otherwise. These cases distinguish unreachable calls
+from calls whose result is unknown.
 
-Bound-method objects in the heap are the only callable carrier.
+## Attribute lookup and class tests
 
-### Attribute access
+Attribute lookup on `any` gives result `any`; the runtime checks whether the
+actual object provides the method. For `A | B`, source lookup must succeed on
+both alternatives because the object can have either type. It combines the
+two method types with a union.
 
-Ordinary attribute lookup does not return a closure-like value. It
-allocates a fresh bound-method heap object and returns its object
-reference.
+For `A & B`, one successful lookup is sufficient because the object must meet
+both class requirements. If both lookups succeed, the method value must meet
+both function requirements, so the result is their intersection.
 
-That representation is used uniformly by:
+A class test refines a variable using the information available before the test:
 
-- ordinary attribute access
-- dynamic attribute access
-- callable witnesses
-- the call rules
+| Type before `isInstance(x, C)` | Positive branch | Negative branch |
+| --- | --- | --- |
+| `any` | `C` | `negClass C` |
+| `A & any` | `A & C` | `A & negClass C` |
+| `A \| any` | `C` | `negClass C` |
 
-### Control and continuation
+The intersection retains A because it is a simultaneous requirement.
+The union does not guarantee A. The test establishes class information;
+it does not inspect a function's input or result annotations.
 
-The machine state consists of:
+## Compile and enforce the requirements
 
-- heap
-- environment
-- control
-- continuation
+The compiler represents a runtime check type as a *target*.
+A target is the expected type in a form used by the checked language.
 
-The continuation frames record exactly what the runtime is waiting for.
-The call-related frames carry explicit return targets and return labels:
+Class checks inspect the object's MRO. Class exclusion checks require the class
+name to be absent. A union check permits either part; an intersection check
+requires both parts. A successful check returns the same reference and does
+not change the heap.
 
-- `callCallee`
-- `callValue`
-- `awaitArgument`
+A function check verifies that the value is a bound method.
+It cannot test all possible inputs or run the method to predict its results.
+Those requirements are checked when the call takes place.
 
-This is the operational backbone of the call-site mediation design.
+### Check the caller and the method
 
-## Enforcement Semantics
+For the first example, the function expression must produce a bound method.
+Compilation also checks the argument against the caller's selected input target.
 
-`EnforceValue` operates on `BoundaryContract`, not directly on `GTy`.
-Contracts are produced from explicit checked targets by `compileBoundaryTarget`
-and coincide with the old raw compiler on interpreted targets.
+That target retains the argument annotation's class information and replaces
+function parts with `any`. It is a permitted class-formula target.
+The method's parameter check applies its declared requirement.
 
-Three design facts are central.
+The runtime then applies the method's stored requirements:
 
-### Enforcement is heap-read-only
+1. Check the actual argument against the method's declared parameter type.
+2. Run the compiled body with the receiver and argument bound.
+3. Check any returned value against the method's declared result type.
+4. Check that value against the result type expected by the caller.
 
-Enforcement does not allocate and does not mutate the heap.
+The last two requirements can differ. Checking both protects the method's
+declaration and the surrounding expression.
+A failure reports the requirement of the check that rejected the value.
 
-### Callable enforcement is shallow
+### Limit the types used by runtime checks
 
-Callable enforcement checks only whether the value is invokable in the
-runtime sense:
+Source types include intersections of function requirements, but runtime
+targets have a restricted form. `CheckedTargetTy` states this restriction.
 
-- a bound-method object reference passes unchanged
-- an ordinary object reference blames
+Targets permit class types, class exclusions, `any`, bottom, and unions and
+intersections of these forms. They also permit function types whose input and
+result targets are permitted, and unions of permitted targets.
 
-### Successful enforcement is transparent
+A function can be intersected with a class expression only when every bound
+method satisfies that expression. A direct intersection of two function
+signatures, such as `(A -> B) & (C -> D)`, is not a permitted target.
+Function types can still occur inside another function's input or result.
 
-Successful enforcement returns the same object reference it was given.
-That is true for:
+These restrictions let the execution proof use the evidence produced by each
+check. Compilation must supply permitted targets with known class names.
+A source annotation is therefore not automatically a permitted runtime target.
 
-- `unknown`
-- class checks
-- callable checks
-- negated class checks
-- unions and intersections built from those cases
+## Explain failures at their source
 
-This semantic transparency is what keeps the dynamic GG proof's runtime
-simulation structurally compatible with the source and checked precision
-relations.
+Compilation attaches a source location and a requirement to each operation
+that can report blame. The requirement identifies a type check or method lookup.
+For a method, it can identify the parameter or declared result.
 
-### Why Callable Enforcement Is Shallow
+A blame report contains that source requirement and the runtime operation and
+value that failed. The report is supplied by the failing operation, so runtime
+checks do not need to reconstruct source locations from the heap.
 
-FwPython does not enforce callable contracts by manufacturing wrapper values.
-Instead, a callable check asks only whether the object reference is a bound
-method, and the higher-order obligations are discharged by the checked call
-syntax itself. This choice has two motivations.
+`Checked.blame_adequacy` proves that a final blame report describes a requirement
+violated in the final heap. The theorem connects the report to the failed check
+or lookup.
 
-- It keeps runtime value shape stable. Successful enforcement returns the same
-  object reference, which is exactly what the dynamic gradual guarantee needs in
-  order to simulate two precision-related runs without introducing shape
-  mismatches after successful checks.
-- It keeps caller-facing callable behavior unambiguous. A wrapper-based
-  alternative would force the runtime and the proofs to reason about values that
-  potentially present multiple callable interfaces through wrapper chains. By
-  keeping callability tied to bound-method objects and pushing mediation into
-  explicit call frames, the next machine step is determined by the current
-  value shape alone.
+## State the safety guarantees with their assumptions
 
-## How Calls Are Mediated
+The proof tracks valid heap objects, correctly typed variable values, and
+correspondence between the source and compiled class tables.
+It also tracks the type of the current expression and the requirements of
+the remaining operations. Each execution step preserves these facts.
 
-Higher-order behavior is expressed by elaboration plus the checked call
-rules.
+`ElaboratesProgramAt` records a valid source typing proof, the corresponding
+compiled program, and a permitted expected result type P with known class names.
+From the initial heap and an empty environment, `gradual_soundness_at` proves:
 
-For a source call, `compileCheck`:
+- If execution finishes successfully, the result satisfies P.
+- A finished execution can instead report blame.
+- Such an execution cannot produce `runtimeError`.
 
-1. computes a raw caller-side parameter approximation
-   `D := callParamTarget gct argSrcTy`
-2. compiles the callee against `.callable D P`
-3. compiles the argument against `D`
-4. emits a checked `call` node that carries the checked parameter target
-   `callParamCheckedTarget gct argSrcTy` (the checked-target image of `D`),
-   the checked return target `checkedTargetOfRuntimePublicTy P`, and the
-   call-site return labels
+These statements do not require termination. They concern correctly compiled
+programs; malformed checked code supplied directly to the machine is outside
+the theorem's assumptions. For functions, runtime satisfaction establishes that
+the value is a bound method; input and result requirements are enforced at calls.
 
-Operationally, once evaluation reaches a bound-method callee, the
-machine:
+### Translate statically typed programs
 
-1. evaluates the argument
-2. enforces the resulting value against the method's stored parameter
-   contract and parameter labels
-3. runs the method body in the runtime binding order
-   `[param, receiver]`
-4. enforces the body result against the method's stored return contract
-5. enforces that result again against the caller's expected return type
-   using the call-site return labels
-6. restores the caller environment
+A stronger result excludes blame for static programs with the required
+translation evidence. `EmbeddedStaticElaboration` connects the static typing
+of the main expression and method bodies to their gradual and checked versions.
 
-The checked runtime performs two conceptually distinct checks:
+Translated method input and result annotations must be permitted runtime
+targets. For example, a method annotation that directly intersects two function
+signatures is outside this theorem's scope.
+The development does not construct this translation evidence for every
+statically typed program.
 
-- the callee's own contract
-- the caller's use-site expectation
+Given that record, `embedded_static_no_blame` excludes final blame, and
+`embedded_static_success` proves that a finished execution returns a value.
+The Bool identity method is a concrete example in
+[MethodEmbeddingExamples.lean](../FwPython/Examples/Gradual/MethodEmbeddingExamples.lean).
 
-## Exact Safety Invariant
+### Limit the claims about annotation changes
 
-The central invariant is `CheckedStateSafe`.
+The call-acceptance proof shows that enlarging either bounds interval preserves
+acceptance of one call on a fixed valid class table.
+It does not compare the inferred results that later calls use.
+Thus, it does not prove that replacing annotations with `any` preserves
+acceptance or behavior of a whole program.
 
-A checked state is safe when it packages:
+The safety result comes from compiled checks, while the bounds approximation
+controls which source expressions are accepted. These are separate guarantees.
+The detailed regression examples include calls on inferred function results
+because a first-call type alone does not show how later calls behave.
 
-- a well-formed checked heap
-- a well-formed gradual class table
-- an aligned checked class table
-- a typed environment
-- a typed control component
-- a typed continuation
+## Key definitions and results
 
-The continuation typing is exact: it records the input type expected by
-the top frame and the output type eventually produced after the rest of
-the stack runs.
+| Lean name | Role |
+| --- | --- |
+| `GSrcInfer` | Source expression typing, including the computed call result. |
+| `callSourceTy?_accepts_iff` | Exact agreement between call acceptance and its bounds comparison. |
+| `compileCheck` | Compilation of a typed source expression at an expected type and source location. |
+| `compileCheck_checked` | The compiled expression has its expected checked type. |
+| `Checked.gradual_soundness_at` | Execution safety for a correctly compiled whole program. |
 
-This exactness is deliberate. The checked metatheory avoids proof-only
-widening in the machine invariants and keeps refinement explicit through
-`enforce`.
-
-## Witness-Based Value Reasoning
-
-The value-level invariant used throughout preservation and progress is
-`CheckedValueWitness`.
-
-A witness packages:
-
-- well-formedness of the indexed gradual type
-- proof-relevant data explaining why the runtime value inhabits it
-
-The payload is structural:
-
-- `.any` stores `CheckedAnyShape`
-- `.class_` stores `CheckedClassView`
-- `.callable` stores `CheckedCallableView`
-- unions and intersections store recursive witnesses
-- `.negClass` stores runtime shape plus an enforcement property
-
-The positive view forms are exact and shallow:
-
-- `CheckedAnyShape` says the value is a reachable object reference
-- `CheckedClassView` says the object's runtime MRO contains the class
-- `CheckedCallableView` says the object reference is a reachable bound
-  method in the receiver's MRO
-
-Callable evidence is exactly the bound-method case.
-
-## Class-Table Compilation and Elaboration Witnesses
-
-The class-table bridge is explicit.
-
-`IsCompiledMethodAt` records that a checked method:
-
-- preserves names and annotations
-- compiles parameter and return contracts from the gradual annotations
-- uses canonical parameter and return label trees
-- uses a body that is exactly `compileCheck` of a source typing witness
-
-`IsCompiledClassTable` lifts that to class tables.
-
-`ElaboratesProgramAt` is the one elaboration witness connecting a gradual
-program to its checked elaboration at target `P`. It carries:
-
-- compiled class-table correspondence
-- a source typing witness for the main expression
-- exact equality between the checked main term and `compileCheck`
-- `RuntimePublicAnnotation gp.classes P`
-- `WellFormedGTy gp.classes P`
-
-The last two facts live inside the elaboration witness so the soundness and
-dynamic-GG APIs receive them implicitly with the witness. The derived theorem
-`ElaboratesProgramAt.main_elabCheck` exposes the main term through the
-proof-level graph `ElabCheck`; the record's `compileCheck` equality is the
-authoritative shape/label connection used by the provenance and precision
-proofs. The public program comparison theorem layer uses one relation:
-`CheckedProgramPrecision` is the checked/runtime comparison relation, and the
-standard initialization package combines it with source-level main-type facts
-and an `ElaboratedStatePrecision` witness for the initial states.
-The root expectation itself remains a source-side `GTy`; when the checked
-runtime needs structural target information, it uses the explicit image
-`checkedTargetOfRuntimePublicTy P` and the root-only premise
-`ProgramRootTargetInputPrecision`.
-
-## Labels and Blame Provenance
-
-Labels are not anonymous. A label records:
-
-- a scope
-- a site number
-- an owner
-
-Owners are determined by polarity:
-
-- positive boundaries blame the provider
-- negative boundaries blame the context
-
-Compilation allocates labels at the exact syntactic sites where checked
-boundaries are introduced. The current provenance layer tracks all of the
-relevant origin categories:
-
-- main-expression `enforce`
-- main-expression `dynAttrAccess`
-- main-expression call-return labels
-- method-parameter boundary labels
-- method-return boundary labels
-- method-body `enforce`
-- method-body `dynAttrAccess`
-- method-body call-return labels
-
-Source operators track canonical origin summaries through `SourceOriginTrace`,
-canonical origin sets, and the corresponding callable/attribute summary keys.
-These keys give duplicate-insensitive operator transport.
-
-This is exposed to the runtime/provenance story through:
-
-- `BoundaryOrigin` and `CompiledBoundaryOrigin` as the canonical compiled-origin
-  handles
-- direct `BoundaryLabels (compileBoundaryTarget T)` indexing
-- centralized target/label/path casts in `BoundaryCast`
-- same-elaboration label reconstruction from one compiled origin plus
-  concrete boundary-path data
-- cross-program blame origin equivalence rather than literal label equality
-
-The provenance and runtime layers distinguish:
-
-- `BoundaryOrigin`, the theorem-level provenance key identifying one compiled
-  boundary
-- `Label.site`, the scope-local label payload stored in the runtime
-
-Two theorems establish existence and uniqueness of blame origins:
-
-- `gradual_blame_correctness_at`
-- `gradual_blame_provenance_origin_unique_at`
-
-A final blame can be traced back to one unique compiled origin with the
-expected owner.
-
-### Why Labels Carry Scope, Site, and Owner
-
-The label structure is designed for the blame theorems, not just for debugging.
-A bare token would be enough to distinguish two failures operationally, but it
-would not explain where the label was introduced or who should be blamed.
-Recording the allocating scope, site number, and polarity-derived owner makes
-blame provenance a theorem about the actual compiled program: the metatheory can
-reconstruct the unique source of a final blame and prove that ownership matches
-the intended positive/negative boundary discipline.
-
-## Established Theorem Surface
-
-The gradual development has the following public theorem story.
-
-### Elaboration typing
-
-`compileCheck_checked` is the primary compiler typing theorem: it proves that
-`compileCheck` of a `GSrcInfer` witness is well typed in the checked system
-under:
-
-- an explicit checked environment `Δ`
-- an explicit expected target `P`
-- `RuntimePublicAnnotation gct P`
-- `WellFormedGTy gct P`
-
-`ElabCheck` is the proof-level graph of `compileCheck`. `compileCheck_elaborates`
-produces an `ElabCheck` witness for the compiler output, and `elabCheck_checked`
-delivers the checked typing fact from that witness. The theorem is
-target-relative; those target facts are typically supplied by
-`ElaboratesProgramAt`.
-
-### Initial safety
-
-`compiled_initial_safe_at` proves safety of the compiled initial state from:
-
-- well-formed class-table facts
-- alignment facts
-- a source typing witness
-- runtime-public admissibility and well-formedness of the target `P`
-
-`compiled_initial_safe_from_elaboration_at` is the witness-based bridge
-that derives the same initial safety fact directly from
-`ElaboratesProgramAt`.
-
-`initial_state_precision`, `initial_state_elaborated_precision`, and
-`initial_elaborated_state_precision` are the public entry packages for the
-precision side. They consume:
-
-- `ProgramTargetPrecision`
-- `ProgramRootTargetInputPrecision`
-- elaboration witnesses on both sides
-
-and produce checked-program precision together with the initial
-`ElaboratedStatePrecision` package used by DGG.
-
-### End-to-end soundness
-
-`gradual_soundness_at` is the canonical target-relative soundness theorem.
-Its inputs are an `ElaboratesProgramAt` witness — which already carries
-`RuntimePublicAnnotation gp.classes P`, restricting the root expected type
-`P` to the admissible runtime-public target fragment `CheckedTargetTy` —
-together with an execution to a final state. The theorem says nothing about
-runs that diverge; for runs that do reach a final state it concludes:
-
-- success with a witness for `runtimePublicTy P` (equivalently the
-  interpretation of the recorded root checked target), or
-- blame
-
-and excludes raw `runtimeError`.
-
-### Static gradual guarantee
-
-`static_gradual_guarantee` is the static GG theorem. It consumes:
-
-- `ProgramTargetPrecision`
-- `ProgramRootTargetInputPrecision`
-- the two `ElaboratesProgramAt` witnesses
-
-and returns `CheckedProgramPrecision`. The companion corollary
-`static_gradual_guarantee_main_moreStatic` exposes the main-expression
-`MoreStatic` fact packaged with that same checked-program relation.
-
-### Dynamic gradual guarantee
-
-The binary dynamic theorem is:
-
-- `dynamic_gradual_guarantee_at`
-- `dynamic_gradual_guarantee`
-
-It takes two `ProgramTargetPrecision`-related elaborated programs together
-with two `Steps` traces from their initial states that both reach a final
-state, starts from the `InitialElaboratedStateAlignmentPackage`, and runs
-the simulation over `ElaboratedStatePrecision`. The conclusion is the
-asymmetric `CheckedOutcomePrecision` on the two final checked outcomes;
-the case where one side terminates and the other diverges is outside the
-theorem's scope.
-
-The asymmetry of `CheckedOutcomePrecision` is the standard DGG content:
-
-- success on both sides matches with heap and value precision
-- blame on the more-static side is compatible with blame or success on
-  the less-static side
-- there is no constructor relating success on the more-static side with
-  blame on the less-static side, so weakening an annotation toward `any`
-  cannot turn a successful terminating run into one that blames
-
-## Why the Proof Works
-
-Three proof-architecture choices do most of the work.
-
-### The runtime model and the proof shape match
-
-The metatheory reasons about the same distinctions the machine actually
-uses:
-
-- ordinary object vs bound method
-- class view vs callable view
-- explicit enforcement frame vs explicit call-return boundary
-
-That alignment is what keeps preservation, blame provenance, and the
-dynamic simulation local.
-
-### Value invariants are exact
-
-The proof does not try to recover operational facts from broad value
-typings after the fact. It carries exact witnesses and exact frame
-typings from the start.
-
-### Enforcement preserves runtime value shape
-
-The dynamic-GG argument depends critically on the fact that successful
-enforcement is transparent: it returns the same object reference it was
-given, so runtime simulation is structurally compatible with the source
-and checked precision relations.
-
-## Constructive Elaboration
-
-The elaboration pipeline is constructive end-to-end: every executable
-helper computes on a well-formed gradual class table without classical
-reasoning.
-
-- `computeGMro?` is a fuel-bounded executable MRO search, sound and
-  complete against the inductive `GComputeMro`. Its completeness uses
-  `gComputeMro_determinism` to identify the unique returned MRO.
-- `lookupMethodTy?` is built directly on `computeGMro?` and
-  `findGMethodInMro`.
-- `callSourceTy?` is the executable call-result computation on
-  `CallableSummary`. At each leaf facet it uses well-formedness proofs to
-  install `assignableTo_decidable`, and the companion relation
-  `CallResultWitness` packages the proof-relevant explanation of the result.
-- `GSrcInfer` is indexed by `WellFormedGClassTableCore`. Its `.call`
-  constructor stores callable, well-formedness, and argument
-  well-formedness proofs alongside the result equation, so every
-  derivation tree carries the proofs needed to compute its own
-  elaboration.
-- `Decidable (FormulaGTy …)`, `Decidable (BMCompatibleFormula …)`,
-  `Decidable (RuntimePublicAnnotation …)`, and
-  `Decidable (CheckedBranchRefineOk …)` are global instances; the
-  BM-compatible decider collapses the universal over MROs into a single
-  `match` on `computeGMro? gct boundMethodClass`.
-
-With those instances in scope, `compileCheck` is a plain `def` and every
-`if CheckedBranchRefineOk … then …` / `by_cases` site computes through
-typeclass inference.
-
-This constructiveness matters because elaboration is part of the public story,
-not just a proof artifact. `compileCheck` is supposed to be the compiler from
-gradual source terms to checked terms. If its branching depended on classical
-choice, the theorem surface could still state that elaboration exists, but the
-development would lose the stronger claim that the elaborator actually computes
-from a well-formed program and that precision theorems compare concrete
-compiled outputs.
-
-## File Guide
-
-The main files for the gradual development are:
-
-- `FwPython/Gradual/Language.lean`
-  public surface for the gradual language
-- `FwPython/Gradual/ClassTable.lean`
-  gradual methods, classes, and programs with direct `GTy` annotations
-- `FwPython/Gradual/Contracts.lean`
-  umbrella for `BoundaryContract`, label structure, compilation, and
-  runtime-public-type semantics
-- `FwPython/Gradual/Checked/Core/{Syntax,Runtime,Machine}.lean`
-  checked syntax, runtime relations, and operational semantics
-- `FwPython/Gradual/TypeSystem/Source/{Core,Typing,Precision}.lean`
-  source environments, `GSrcInfer`, and source precision
-- `FwPython/Gradual/TypeSystem/Source/Elaboration.lean`
-  the `ElabCheck` graph and its checked-typing corollary
-- `FwPython/Gradual/TypeSystem/Source/Compile.lean`
-  umbrella for `compileCheck`, the `ElabCheck` graph, approximation
-  helpers, label erasure, and site-analysis lemmas
-- `FwPython/Gradual/TypeSystem/ClassTable/Compile.lean`
-  checked class-table compilation and `ElaboratesProgramAt`
-- `FwPython/Gradual/TypeSystem/StaticEmbeddingBridge.lean`
-  packages static `HasType` derivations with the gradual-source bridges used
-  to reuse checked elaboration
-- `FwPython/Gradual/TypeSystem/ValueTyping.lean`
-  exact checked runtime witnesses and positive view forms
-- `FwPython/Gradual/TypeSystem/{Safety,Progress,Preservation,Soundness}.lean`
-  checked-machine safety and end-to-end soundness
-- `FwPython/Gradual/TypeSystem/Blame/{Correctness,Provenance}.lean`
-  blame-origin existence, owner correctness, and uniqueness
-- `FwPython/Gradual/TypeSystem/{StaticGG,RuntimePrecision,DynamicGG}.lean`
-  static and dynamic gradual guarantees
-- `FwPython/Static/TypeSystem/{Typing,TypingLemmas}.lean`
-  definition-only static `HasType` core plus its theorem layer, which the
-  embedding bridge consumes from the static side
-
-## Summary
-
-FwPython's gradual layer is a checked-target development with:
-
-- a semantic source layer (`MoreStatic`, boundary precision, source/program
-  annotation precision)
-- explicit normalized checked-target syntax
-- split checked/runtime precision relations: `CheckedTargetPrecision` for
-  stored checked annotations and `CompileTargetPrecision` for compile-generated
-  payloads such as normalized call-parameter targets
-- a DGG-only `ElaboratedStatePrecision` wrapper on top of checked-state
-  precision
-- explicit boundary insertion by elaboration
-- a checked runtime with only object-reference values
-- shallow callable enforcement
-- exact witness-based safety invariants
-- blame provenance with unique origins
-- one static GG theorem and one dynamic GG theorem
-
-Well-typed gradual programs elaborate to a checked machine that either
-returns a properly witnessed value or blames at a uniquely identified
-compiled boundary. Precision-related programs are compared semantically at the
-source level, structurally through checked-target images at the program root
-and method signatures, and dynamically through the elaborated-state simulation
-wrapper used by the final dynamic gradual guarantee.
+The public imports are `FwPython.Gradual.Language` for language definitions and
+`FwPython.Gradual` for the complete gradual development.

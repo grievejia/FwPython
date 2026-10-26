@@ -1,182 +1,193 @@
-import FwPython.Static.MRO.Properties
+import FwPython.Static.Subtyping.Algebra
 
-/-! # Subtyping for the Mini Object-Oriented Language
+/-! # Static subtyping from type equations
 
-Declarative subtyping relation parameterized by a class table.
-Transitivity is primitive, so the relation serves as a specification-oriented
-foundation for soundness and the class-only negative fragment. -/
+A source type is a subtype when adding it as a union alternative leaves the target unchanged.
+The lattice, function, and class equations derive the subtype rules in this module.
+`WellFormedClassHierarchy` supplies the known class names and their valid MROs.
+-/
 
-/-! ## Leaf built-in classes -/
+open FwPython.Static.Subtyping
 
-/-- A leaf built-in is one of the three designated built-in class names
-    (`Bool`, `NoneType`, `BoundMethod`) together with evidence that it is
-    sealed in the given class table — i.e. the only class whose MRO
-    contains that name is the built-in itself.
+/-- Subtyping combines valid source and target annotations with the equation
+that adding the source to the target union leaves the target unchanged.
+The hierarchy supplies the class context and valid MROs. -/
+def IsSubtype {ct : ClassTable} (structural : WellFormedClassHierarchy ct)
+    (source target : Ty) : Prop :=
+  TypeEquivalence.Subtype structural.typeContext source target
 
-    This is a factoring of the existing leaf invariants in
-    `WellFormedClassTable` (`builtinsLeaf`, `noneLeaf`, `boundMethodLeaf`).
-    Unlike the earlier generic `ClassesDisjoint` predicate, `LeafBuiltin`
-    is restricted by construction to the three designated built-ins. It
-    cannot be instantiated for arbitrary user-defined classes, so the
-    resulting negative facts are open-world-safe. -/
-inductive LeafBuiltin (ct : ClassTable) : Identifier → Prop where
-  | bool :
-      (∀ cname c mro, findClass ct cname = some c →
-        ComputeMro ct c mro → boolClass ∈ mro → cname = boolClass) →
-      LeafBuiltin ct boolClass
-  | none :
-      (∀ cname c mro, findClass ct cname = some c →
-        ComputeMro ct c mro → noneClass ∈ mro → cname = noneClass) →
-      LeafBuiltin ct noneClass
-  | boundMethod :
-      (∀ cname c mro, findClass ct cname = some c →
-        ComputeMro ct c mro → boundMethodClass ∈ mro → cname = boundMethodClass) →
-      LeafBuiltin ct boundMethodClass
+section
 
-/-- Extract the sealing property from a `LeafBuiltin` proof. -/
-theorem LeafBuiltin.sealed (h : LeafBuiltin ct B) :
-    ∀ cname c mro, findClass ct cname = some c →
-      ComputeMro ct c mro → B ∈ mro → cname = B :=
-  match h with
-  | .bool hleaf => hleaf
-  | .none hleaf => hleaf
-  | .boundMethod hleaf => hleaf
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
 
-/-- `IsSubtype ct T U` means `T` is a subtype of `U` under class table `ct`. -/
-inductive IsSubtype : ClassTable → Ty → Ty → Prop where
+namespace IsSubtype
 
-  -- Group 1: Preorder
+/-! Each subtype rule follows from the generated lattice, function, or class equations. -/
 
-  /-- Reflexivity: every type is a subtype of itself. -/
-  | refl :
-      IsSubtype ct T T
+/-- Equal declaration lists and their unique hierarchy data give the same subtype judgment. -/
+theorem transport {firstTable secondTable : ClassTable}
+    {first : WellFormedClassHierarchy firstTable} {second : WellFormedClassHierarchy secondTable}
+    {source target : Ty} (tablesEqual : firstTable = secondTable) :
+    IsSubtype first source target ↔ IsSubtype second source target := by
+  subst secondTable
+  cases Subsingleton.elim first second
+  rfl
 
-  /-- Transitivity. -/
-  | trans :
-      IsSubtype ct T U →
-      IsSubtype ct U V →
-      IsSubtype ct T V
+/-- The source of every subtype proof is a valid type. -/
+theorem sourceWellFormed (included : IsSubtype structural T U) : WellFormedTy ct T :=
+  included.sourceNamesKnown
 
-  -- Group 2: Bounded distributive lattice
+/-- The target of every subtype proof is a valid type. -/
+theorem targetWellFormed (included : IsSubtype structural T U) : WellFormedTy ct U :=
+  included.targetNamesKnown
 
-  /-- Bottom is a subtype of every type. -/
-  | bottom :
-      IsSubtype ct .bottom T
+/-- Every valid type is below itself. -/
+theorem refl (valid : WellFormedTy ct T) : IsSubtype structural T T :=
+  TypeEquivalence.Subtype.refl valid
 
-  /-- Every type is a subtype of `class_ objectClass`. -/
-  | objectTop :
-      IsSubtype ct T (.class_ objectClass)
+/-- Subtype proofs compose within the same table context. -/
+theorem trans (first : IsSubtype structural T U) (second : IsSubtype structural U V) : IsSubtype structural T V :=
+  TypeEquivalence.Subtype.trans first second
 
-  /-- Intersection left projection: `T & U <: V` if `T <: V`. -/
-  | interLeft :
-      IsSubtype ct T V →
-      IsSubtype ct (.intersection T U) V
+/-- Bottom is below every valid type. -/
+theorem bottom (valid : WellFormedTy ct T) : IsSubtype structural .bottom T :=
+  TypeEquivalence.Subtype.bottom valid
 
-  /-- Intersection right projection: `T & U <: V` if `U <: V`. -/
-  | interRight :
-      IsSubtype ct U V →
-      IsSubtype ct (.intersection T U) V
+/-- Object is above every valid type. -/
+theorem objectTop (valid : WellFormedTy ct T) : IsSubtype structural T (.class_ objectClass) :=
+  TypeEquivalence.Subtype.objectTop valid
 
-  /-- Intersection on the right decomposes: `T <: U & V` if both `T <: U` and `T <: V`. -/
-  | interIntro :
-      IsSubtype ct T U →
-      IsSubtype ct T V →
-      IsSubtype ct T (.intersection U V)
+/-- If the first component is below the target, its intersection with a valid type is also below it. -/
+theorem interLeft (included : IsSubtype structural T V) (rightValid : WellFormedTy ct U) :
+    IsSubtype structural (.intersection T U) V :=
+  TypeEquivalence.Subtype.interLeft included rightValid
 
-  /-- Union on the left decomposes: `T | U <: V` if both `T <: V` and `U <: V`. -/
-  | unionElim :
-      IsSubtype ct T V →
-      IsSubtype ct U V →
-      IsSubtype ct (.union T U) V
+/-- If the second component is below the target, its intersection with a valid type is also below it. -/
+theorem interRight (included : IsSubtype structural U V) (leftValid : WellFormedTy ct T) :
+    IsSubtype structural (.intersection T U) V :=
+  TypeEquivalence.Subtype.interRight included leftValid
 
-  /-- Union left injection: `T <: U | V` if `T <: U`. -/
-  | unionLeft :
-      IsSubtype ct T U →
-      IsSubtype ct T (.union U V)
+/-- A type below both targets is below their intersection. -/
+theorem interIntro (left : IsSubtype structural T U) (right : IsSubtype structural T V) :
+    IsSubtype structural T (.intersection U V) :=
+  TypeEquivalence.Subtype.interIntro left right
 
-  /-- Union right injection: `T <: U | V` if `T <: V`. -/
-  | unionRight :
-      IsSubtype ct T V →
-      IsSubtype ct T (.union U V)
+/-- A union is below the target when both alternatives are below it. -/
+theorem unionElim (left : IsSubtype structural T V) (right : IsSubtype structural U V) :
+    IsSubtype structural (.union T U) V :=
+  TypeEquivalence.Subtype.unionElim left right
 
-  /-- Forward distributivity of intersection over union. -/
-  | interUnionDistrib :
-      IsSubtype ct (.intersection T (.union U V))
-        (.union (.intersection T U) (.intersection T V))
+/-- A type below the left alternative is below the union. -/
+theorem unionLeft (included : IsSubtype structural T U) (rightValid : WellFormedTy ct V) :
+    IsSubtype structural T (.union U V) :=
+  TypeEquivalence.Subtype.unionLeft included rightValid
 
-  -- Group 3: Nominal classes
+/-- A type below the right alternative is below the union. -/
+theorem unionRight (included : IsSubtype structural T V) (leftValid : WellFormedTy ct U) :
+    IsSubtype structural T (.union U V) :=
+  TypeEquivalence.Subtype.unionRight included leftValid
 
-  /-- Class subtyping via MRO. -/
-  | class_ :
-      findClass ct cname = some c →
-      ComputeMro ct c mro →
-      aname ∈ mro →
-      IsSubtype ct (.class_ cname) (.class_ aname)
+/-- Enlarging each alternative enlarges their union. -/
+theorem unionMono (left : IsSubtype structural T U) (right : IsSubtype structural V W) :
+    IsSubtype structural (.union T V) (.union U W) :=
+  .unionElim (.unionLeft left right.targetWellFormed) (.unionRight right left.targetWellFormed)
 
-  -- Group 4: Arrows
+/-- Enlarging each requirement enlarges their intersection. -/
+theorem interMono (left : IsSubtype structural T U) (right : IsSubtype structural V W) :
+    IsSubtype structural (.intersection T V) (.intersection U W) :=
+  .interIntro (.interLeft left right.sourceWellFormed) (.interRight right left.sourceWellFormed)
 
-  /-- Callable subtyping: contravariant in the parameter type,
-      covariant in the return type. -/
-  | callable :
-      IsSubtype ct T' T →
-      IsSubtype ct U U' →
-      IsSubtype ct (.callable T U) (.callable T' U')
+/-- The class found by lookup is below each class in its computed MRO. -/
+theorem class_ (lookup : findClass ct cname = some declaration)
+    (computed : ComputeMro ct declaration linearization) (member : aname ∈ linearization) :
+    IsSubtype structural (.class_ cname) (.class_ aname) := by
+  have known := findClass_name_known lookup
+  have ancestor := (structural.typeContext_mro lookup computed).symm ▸ member
+  exact TypeEquivalence.Subtype.inheritance known ancestor
 
-  /-- Every callable type is a subtype of `class_ BoundMethod`. -/
-  | callableBoundMethod :
-      findClass ct boundMethodClass = some bmCls →
-      ComputeMro ct bmCls bmMro →
-      IsSubtype ct (.callable P R) (.class_ boundMethodClass)
+/-- Function subtyping reverses the input relation and preserves the result relation. -/
+theorem callable (domain : IsSubtype structural Q P) (result : IsSubtype structural R S) :
+    IsSubtype structural (.callable P R) (.callable Q S) :=
+  TypeEquivalence.Subtype.callable domain result
 
-  /-- Callable intersections summarize to a callable with the unioned domain
-      and intersected codomain:
-      `(P → R) & (Q → S) <: (P | Q) → (R & S)`. -/
-  | callableInterUnion :
-      IsSubtype ct
-        (.intersection (.callable P R) (.callable Q S))
-        (.callable (.union P Q) (.intersection R S))
+/-- Every valid function type requires a callable value. -/
+theorem callableBoundMethod (inputValid : WellFormedTy ct P) (resultValid : WellFormedTy ct R) :
+    IsSubtype structural (.callable P R) (.class_ boundMethodClass) :=
+  TypeEquivalence.Subtype.callableBoundMethod inputValid resultValid
 
-  -- Group 5: Class-only negative facts
+/-- Every callable value satisfies a valid function requirement with an empty input. -/
+theorem boundMethodEmptyDomain (resultValid : WellFormedTy ct R) :
+    IsSubtype structural (.class_ boundMethodClass) (.callable .bottom R) :=
+  TypeEquivalence.toSubtype (context := structural.typeContext)
+    (TypeEquivalence.functionEmptyInput (context := structural.typeContext) (R := resultValid.toType)).symm
 
-  /-- Object-level excluded middle lifted from `class_ objectClass`:
-      `class_ Object <: class_ C | negClass C`. -/
-  | objectClassUnionNegClass :
-      IsSubtype ct (.class_ objectClass) (.union (.class_ C) (.negClass C))
+/-- Function types with the same valid input intersect their result types. -/
+theorem callableSharedDomain (inputValid : WellFormedTy ct P)
+    (leftValid : WellFormedTy ct R) (rightValid : WellFormedTy ct S) : IsSubtype structural
+    (.intersection (.callable P R) (.callable P S)) (.callable P (.intersection R S)) :=
+  TypeEquivalence.toSubtype (context := structural.typeContext)
+    (TypeEquivalence.functionIntersectionResult (context := structural.typeContext)
+      (P := inputValid.toType) (R := leftValid.toType) (S := rightValid.toType)).symm
 
-  /-- Designated leaf built-ins exclude every class outside their MRO. -/
-  | sealedClassNegClass :
-      LeafBuiltin ct B →
-      findClass ct B = some bcls →
-      ComputeMro ct bcls bmro →
-      C ∉ bmro →
-      IsSubtype ct (.class_ B) (.negClass C)
+/-- Two requirements of the same function accept the shared input and require both results. -/
+theorem callableMeet (left : IsSubtype structural X (.callable P₁ R₁))
+    (right : IsSubtype structural X (.callable P₂ R₂)) :
+    IsSubtype structural X (.callable (.intersection P₁ P₂) (.intersection R₁ R₂)) :=
+  .trans
+    (.interIntro
+      (.trans left (.callable
+        (.interLeft (.refl left.targetWellFormed.callable_param) right.targetWellFormed.callable_param)
+        (.refl left.targetWellFormed.callable_return)))
+      (.trans right (.callable
+        (.interRight (.refl right.targetWellFormed.callable_param) left.targetWellFormed.callable_param)
+        (.refl right.targetWellFormed.callable_return))))
+    (.callableSharedDomain
+      (.intersection left.targetWellFormed.callable_param right.targetWellFormed.callable_param)
+      left.targetWellFormed.callable_return right.targetWellFormed.callable_return)
 
-  /-- Every class contradicts its own negative atom. -/
-  | classSelfNegClassBottom :
-      IsSubtype ct (.intersection (.class_ C) (.negClass C)) .bottom
+/-- The intersection of `P -> R` and `Q -> S` lies below `(P | Q) -> (R | S)`.
+The combined requirement covers both input alternatives and allows either result type. -/
+theorem callableCorrelatedSummary (validP : WellFormedTy ct P) (validQ : WellFormedTy ct Q)
+    (validR : WellFormedTy ct R) (validS : WellFormedTy ct S) : IsSubtype structural
+    (.intersection (.callable P R) (.callable Q S)) (.callable (.union P Q) (.union R S)) :=
+  .trans
+    (.interIntro
+      (.interLeft (.callable (.refl validP) (.unionLeft (.refl validR) validS)) (.callable validQ validS))
+      (.interRight (.callable (.refl validQ) (.unionRight (.refl validS) validR)) (.callable validP validR)))
+    (TypeEquivalence.toSubtype (context := structural.typeContext)
+      (TypeEquivalence.functionUnionInput (context := structural.typeContext)
+        (P := validP.toType) (Q := validQ.toType) (R := .union validR.toType validS.toType)).symm)
 
-/-- Every type is a subtype of `class Object`. -/
-theorem class_subtype_object :
-    IsSubtype ct (.class_ cname) (.class_ objectClass) :=
-  .objectTop
+/-- A known class type or its complement covers Object. -/
+theorem objectClassUnionNegClass (classValid : WellFormedTy ct (.class_ C)) : IsSubtype structural
+    (.class_ objectClass) (.union (.class_ C) (.negClass C)) :=
+  TypeEquivalence.toSubtype (context := structural.typeContext) (TypeEquivalence.classComplement
+    (by cases classValid; assumption)).symm
 
-/-- A union of callables subsumes to a safe summary callable:
-    `(P1 → R1) | (P2 → R2) <: (P1 & P2) → (R1 | R2)`. -/
-theorem subtype_union_callable_summary :
-    IsSubtype ct
-      (.union (.callable p1 r1) (.callable p2 r2))
-      (.callable (.intersection p1 p2) (.union r1 r2)) :=
-  .unionElim (.callable (.interLeft .refl) (.unionLeft .refl))
-    (.callable (.interRight .refl) (.unionRight .refl))
+/-- A sealed builtin excludes known classes outside its computed MRO. -/
+theorem sealedClassNegClass (sealed : B ∈ sealedClasses)
+    (lookup : findClass ct B = some declaration) (computed : ComputeMro ct declaration linearization)
+    (excluded : C ∉ linearization) (classValid : WellFormedTy ct (.class_ C)) :
+    IsSubtype structural (.class_ B) (.negClass C) := by
+  cases classValid with
+  | class_ known =>
+      exact TypeEquivalence.Subtype.sealedClassNegClass sealed known
+        (by simpa only [structural.typeContext_mro lookup computed] using excluded)
 
-/-! ## Well-formedness -/
+/-- A known class type contradicts its complement. -/
+theorem classSelfNegClassBottom (classValid : WellFormedTy ct (.class_ C)) :
+    IsSubtype structural (.intersection (.class_ C) (.negClass C)) .bottom :=
+  TypeEquivalence.toSubtype (context := structural.typeContext) (TypeEquivalence.classContradiction
+    (by cases classValid; assumption))
 
-/-- A type is well-formed under a class table if every class name it mentions
-    exists in the class table and has a valid MRO. -/
-inductive WellFormedTy : ClassTable → Ty → Prop where
-  | bottom : WellFormedTy ct .bottom
-  | class_ : findClass ct cname = some c → ComputeMro ct c mro → WellFormedTy ct (.class_ cname)
-  | negClass : findClass ct cname = some c → ComputeMro ct c mro → WellFormedTy ct (.negClass cname)
-  | union : WellFormedTy ct T → WellFormedTy ct U → WellFormedTy ct (.union T U)
-  | intersection : WellFormedTy ct T → WellFormedTy ct U → WellFormedTy ct (.intersection T U)
-  | callable : WellFormedTy ct T → WellFormedTy ct U → WellFormedTy ct (.callable T U)
+end IsSubtype
+
+/-- A union of function types accepts inputs below both parameter types and unions their results. -/
+theorem subtype_union_callable_summary (validP1 : WellFormedTy ct p1) (validP2 : WellFormedTy ct p2)
+    (validR1 : WellFormedTy ct r1) (validR2 : WellFormedTy ct r2) : IsSubtype structural
+    (.union (.callable p1 r1) (.callable p2 r2))
+    (.callable (.intersection p1 p2) (.union r1 r2)) :=
+  .unionElim (.callable (.interLeft (.refl validP1) validP2) (.unionLeft (.refl validR1) validR2))
+    (.callable (.interRight (.refl validP2) validP1) (.unionRight (.refl validR2) validR1))
+
+end

@@ -5,11 +5,11 @@ import FwPython.Builtins
 
 /-! # Erasure and embedding between gradual and fully static types
 
-The erasure from `GClassTable` to `ClassTable` preserves only the class
-hierarchy (names and base-class lists). Method entries receive dummy `Ty`
-annotations and dummy `Expr` bodies. The erased fully static class table
-is used exclusively for hierarchy and subtyping queries through
-`FwPython.Static.Subtyping.Core` — never for method-level reasoning. -/
+Erasure preserves class names and base-class lists while replacing method
+annotations and bodies with dummy values. MRO computation and subtyping read only
+the class names and base-class lists; they never consult the dummy method entries.
+The type bounds and embedding functions connect gradual annotations to the static
+type language. -/
 
 /-! ## Erasure definitions -/
 
@@ -68,21 +68,6 @@ def embedExpr : Expr → GExpr
 
 /-! ## Class lookup bridge -/
 
-private theorem findByName_map_eq
-    (f : α → β)
-    (getNameβ : β → Identifier)
-    (getNameα : α → Identifier)
-    (hname : ∀ x, getNameβ (f x) = getNameα x)
-    (xs : List α) (name : Identifier) :
-    findByName getNameβ (xs.map f) name =
-      (findByName getNameα xs name).map f := by
-  induction xs with
-  | nil => rfl
-  | cons a l ih =>
-      by_cases h : getNameα a = name
-      · simp [findByName, h, hname]
-      · simpa [findByName, h, hname] using ih
-
 /-- Unified bridge: `findClass` on the erased table equals `findGClass`
     composed with `Option.map eraseClass`. -/
 theorem findClass_eraseClassTable_eq (gct : GClassTable) (cname : Identifier) :
@@ -113,15 +98,14 @@ theorem eraseClassTable_classNamesUnique {gct : GClassTable}
 
 /-! ## Static top -/
 
-/-- The fully static universal supertype, `class_ objectClass`. Used as
-    the upper bound of `any` (the unknown fully static type) under the
-    semantic gradual interpretation. -/
+/-- The fully static universal supertype, `class_ objectClass`, used as the
+upper bound of `any`. -/
 def staticTop : Ty := .class_ objectClass
 
 /-! ## Type embedding -/
 
-/-- Embed a static type into the gradual type language, preserving the
-    primitive `negClass` atom. -/
+/-- Embed a static type into the gradual type language, preserving class names,
+class exclusions, unions, intersections and function structure. -/
 def embedTy : Ty → GTy
   | .class_ c => .class_ c
   | .negClass c => .negClass c
@@ -130,16 +114,18 @@ def embedTy : Ty → GTy
   | .intersection t u => .intersection (embedTy t) (embedTy u)
   | .bottom => .bottom
 
-/-! ## Semantic lower and upper bounds -/
+/-! ## Static lower and upper bounds
+
+These bounds describe an interval of static types that approximates filling each
+`any` occurrence with a static type. Function input subtyping reverses the order,
+so the lower and upper bounds exchange roles in input positions.
+-/
 
 mutual
-/-- The fully static lower bound of a gradual type: the largest fully
-    static type that every materialization of the gradual type is a
-    supertype of.
-
-    `any` (the unknown fully static type) lowers to `bottom` (no
-    obligation). Callable types are contravariant/covariant as usual.
-    `negClass C` is atomic and lowers to the same static atom. -/
+/-- Compute the lower endpoint of the static bounds interval for a gradual type.
+`any` contributes `bottom`. Function inputs use `upperBound`, because input
+subtyping reverses the order; results use `lowerBound`. Class types and exclusions
+keep their names, and unions and intersections keep their structure. -/
 def lowerBound : GTy → Ty
   | .any => .bottom
   | .class_ c => .class_ c
@@ -149,13 +135,10 @@ def lowerBound : GTy → Ty
   | .bottom => .bottom
   | .negClass c => .negClass c
 
-/-- The fully static upper bound of a gradual type: the smallest fully
-    static type that every materialization of the gradual type is a
-    subtype of.
-
-    `any` (the unknown fully static type) uppers to `staticTop`.
-    Callable types are contravariant/covariant as usual. `negClass C`
-    is atomic. -/
+/-- Compute the upper endpoint of the static bounds interval for a gradual type.
+`any` contributes `staticTop`. Function inputs use `lowerBound`, because input
+subtyping reverses the order; results use `upperBound`. Class types and exclusions
+keep their names, and unions and intersections keep their structure. -/
 def upperBound : GTy → Ty
   | .any => staticTop
   | .class_ c => .class_ c

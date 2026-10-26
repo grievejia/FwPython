@@ -6,36 +6,38 @@ import FwPython.Gradual.TypeSystem.Progress
 /-! # End-to-end soundness for the target-relative gradual type system
 
 If a gradual program has a `GSrcInfer` witness and an explicit expected
-checked target `P`, the compiled checked program starts safe at
-`runtimePublicTy P`. Any final result reached from that state is either a
-successful value witnessing `runtimePublicTy P` or blame. Raw
-`runtimeError` is ruled out. -/
+checked target `P`, the compiled checked program starts safe at `P`. Any
+final result reached from that state is either a successful value
+witnessing `P` or blame. Raw `runtimeError` is ruled out. -/
 
 namespace Checked
 
+/-- A checked expression produced by source compilation at `site` starts in a
+safe initial checked state when the checked class table is aligned. -/
 theorem compiled_initial_safe_at
     (hwfct : WellFormedGClassTableCore gct)
-    (halign : AlignedCheckedClassTable gct cct)
+    (halign : AlignedCheckedClassTable gct hwfct.toWellFormedClassHierarchy cct)
     (hsrc : GSrcInfer gct hwfct [] e srcTy)
-    (hPruntime : RuntimePublicAnnotation gct P)
+    (hPruntime : CheckedTargetTy gct P)
     (hPwf : WellFormedGTy gct P)
-    (n : Nat) :
+    (site : SourceExpressionSite) :
     CheckedStateSafe gct cct CheckedHeap.initial []
-      (.expr (compileCheck .main hsrc [] P n).1)
+      (.expr (compileCheck hsrc [] P site))
       []
-      (runtimePublicTy P) := by
-  refine ⟨[], [], runtimePublicTy P,
+      P := by
+  refine ⟨[], [], P,
     hwfct,
     checkedHeapInitial_wellFormed hwfct.raw,
     halign,
-    fun _ _ hlook => by simp [NamedEnv.lookup] at hlook,
-    .expr ?_,
+    nofun,
+    .expr (compileCheck_checked
+      (helab := .nil)
+      hwfct
+      hPruntime hPwf hsrc site),
     .nil⟩
-  exact elabCheck_checked .main hsrc
-    (henv := by intro b hb; cases hb)
-    (helab := .nil)
-    hPruntime hPwf compileCheck_elaborates
 
+/-- A whole-program checked elaboration artifact starts in a safe initial
+checked state at its requested target. -/
 theorem compiled_initial_safe_from_elaboration_at
     (hcompiled : ElaboratesProgramAt gp P cp) :
     CheckedStateSafe gp.classes cp.classes
@@ -43,23 +45,22 @@ theorem compiled_initial_safe_from_elaboration_at
       (initialState cp).env
       (initialState cp).control
       (initialState cp).continuation
-      (runtimePublicTy P) := by
-  refine ⟨[], [], runtimePublicTy P,
+      P := by
+  refine ⟨[], [], P,
     hcompiled.hwfct,
     checkedHeapInitial_wellFormed hcompiled.hwfct.raw,
-    alignedCheckedClassTable_of_compiled hcompiled.hwfct hcompiled.classes_elab,
-    fun _ _ hlook => by simp [NamedEnv.lookup] at hlook,
+    alignedCheckedClassTable_of_compiled hcompiled.classes_elab,
+    nofun,
     .expr ?_,
     .nil⟩
-  simpa [initialState, expressionState] using
-    (elabCheck_checked
-      .main
-      hcompiled.main_hsrc
-      (henv := by intro b hb; cases hb)
+  exact hcompiled.main_eq ▸
+    (compileCheck_checked
       (helab := .nil)
-      hcompiled.target_runtimePublic
+      hcompiled.hwfct
+      hcompiled.target_checkedTarget
       hcompiled.target_wf
-      hcompiled.main_elabCheck)
+      hcompiled.main_hsrc
+      (.main []))
 
 theorem checked_safe_execution_result
     (hsafe : CheckedStateSafe gct cct heap env ctrl cont expectedType)
@@ -69,7 +70,7 @@ theorem checked_safe_execution_result
     (hfinal : finalResult? finalState = some (heap', result)) :
     (∃ v, result = .success v ∧
       CheckedValueWitness gct cct heap' v expectedType) \/
-    (∃ ℓ, result = .blame ℓ) := by
+    (∃ info, result = .blame info) := by
   obtain ⟨Γ, outΓ, G, _, hheap, _, henv, hctrl, hcont⟩ :=
     checked_preservation_multi hsafe hsteps
   simp only [finalResult?] at hfinal
@@ -89,7 +90,7 @@ theorem checked_safe_final_result
       { heap, env, control := ctrl, continuation := cont } = some (heap', result)) :
     (∃ v, result = .success v ∧
       CheckedValueWitness gct cct heap' v expectedType) \/
-    (∃ ℓ, result = .blame ℓ) :=
+    (∃ info, result = .blame info) :=
   checked_safe_execution_result hsafe .refl hfinal
 
 theorem checked_safe_execution_no_runtimeError
@@ -97,11 +98,8 @@ theorem checked_safe_execution_no_runtimeError
     (hsteps : Steps gct cct
       { heap, env, control := ctrl, continuation := cont }
       finalState) :
-    ∀ err, finalState.control ≠ .runtimeError err := by
-  intro err hEq
-  have hsafe' :=
-    checked_preservation_multi hsafe hsteps
-  exact hsafe'.not_runtimeError err hEq
+    ∀ err, finalState.control ≠ .runtimeError err :=
+  (checked_preservation_multi hsafe hsteps).not_runtimeError
 
 theorem gradual_soundness_at
     (hcompiled : ElaboratesProgramAt gp P cp)
@@ -110,8 +108,8 @@ theorem gradual_soundness_at
       finalState)
     (hfinal : finalResult? finalState = some (heap', result)) :
     (∃ v, result = .success v ∧
-      CheckedValueWitness gp.classes cp.classes heap' v (runtimePublicTy P)) \/
-    (∃ ℓ, result = .blame ℓ) :=
+      CheckedValueWitness gp.classes cp.classes heap' v P) \/
+    (∃ info, result = .blame info) :=
   checked_safe_execution_result
     (compiled_initial_safe_from_elaboration_at hcompiled) hsteps hfinal
 

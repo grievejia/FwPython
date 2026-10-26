@@ -1,4 +1,4 @@
-import FwPython.Gradual.Contracts.Labels
+import FwPython.Gradual.Contracts.Core
 
 /-! ## Compilation from GTy to BoundaryContract -/
 
@@ -39,10 +39,6 @@ def normalizeBoundary : BoundaryContract → BoundaryContract
 def compileBoundary (g : GTy) : BoundaryContract :=
   normalizeBoundary (compileBoundaryRaw g)
 
-/-- Compile a callable boundary from domain and codomain gradual types. -/
-def compileCallableBoundary (domain codomain : GTy) : CallableBoundaryContract :=
-  ⟨compileBoundary domain, compileBoundary codomain⟩
-
 /-! ## Compilation facts -/
 
 @[simp] theorem compileBoundary_any : compileBoundary .any = .unknown := rfl
@@ -59,8 +55,7 @@ theorem normalizeBoundary_union_unknown_left (c : BoundaryContract) :
 
 theorem normalizeBoundary_union_unknown_right (c : BoundaryContract) :
     normalizeBoundary (.union c .unknown) = .unknown := by
-  simp [normalizeBoundary]
-  cases normalizeBoundary c <;> rfl
+  simp [normalizeBoundary]; cases normalizeBoundary c <;> rfl
 
 theorem normalizeBoundary_intersection_unknown_left (c : BoundaryContract) :
     normalizeBoundary (.intersection .unknown c) = normalizeBoundary c := by
@@ -68,6 +63,4 @@ theorem normalizeBoundary_intersection_unknown_left (c : BoundaryContract) :
 
 theorem normalizeBoundary_intersection_unknown_right (c : BoundaryContract) :
     normalizeBoundary (.intersection c .unknown) = normalizeBoundary c := by
-  simp [normalizeBoundary]
-  cases normalizeBoundary c <;> rfl
-
+  simp [normalizeBoundary]; cases normalizeBoundary c <;> rfl

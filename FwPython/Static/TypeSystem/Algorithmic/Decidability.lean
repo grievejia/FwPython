@@ -2,54 +2,54 @@ import FwPython.Static.TypeSystem.Algorithmic.Correctness
 
 /-! ## Algorithmic checking and targeted decidability -/
 
-def checkHasType?
-    (hwfct : WellFormedClassTable ct)
-    (hΓwf : WellFormedTyEnv ct Γ)
-    (e : Expr) (T : Ty) : Bool :=
-  match wellFormedTy_decidable hwfct T with
+open FwPython.Static.Subtyping
+
+variable {ct : ClassTable}
+
+/-- Validate the requested annotation once, then compare it with valid inferred candidates.
+The class-table evidence supplies valid method signatures and the structural
+table used by subtype checks. -/
+def checkHasType? (hwfct : WellTypedClassHierarchy ct)
+    (hΓwf : WellFormedTyEnv ct Γ) (e : Expr) (T : Ty) : Bool :=
+  match typeNamesKnown_decidable (ct.map ClassDecl.name) T with
   | isFalse _ => false
-  | isTrue hwfT =>
-      (inferBasis hwfct hΓwf e).attach.any fun entry =>
-        let _ : Decidable (IsSubtype ct entry.1 T) :=
-          isSubtype_decidable hwfct
-            (inferBasis_all_wellFormed hwfct hΓwf entry.2) hwfT
-        decide (IsSubtype ct entry.1 T)
+  | isTrue known =>
+      (inferBasis hwfct Γ hΓwf e).types.any fun source =>
+        letI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy source ⟨T, known⟩
+        decide (IsSubtype hwfct.toWellFormedClassHierarchy source.raw T)
 
-theorem checkHasType?_iff_hasType
-    (hwfct : WellFormedClassTable ct)
+/-- The executable checker accepts exactly the declaratively typed expressions. -/
+theorem checkHasType?_iff_hasType (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ) :
-    checkHasType? hwfct hΓwf e T = true ↔ HasType ct Γ e T := by
+    checkHasType? hwfct hΓwf e T = true ↔ HasType hwfct.toWellFormedClassHierarchy Γ e T := by
   unfold checkHasType?
-  cases hdecT : wellFormedTy_decidable hwfct T with
-  | isFalse hnot =>
-      refine ⟨fun hcheck => by simp at hcheck, fun htype => ?_⟩
-      exact (hnot (hasType_wellFormed hwfct hΓwf htype)).elim
-  | isTrue hwfT =>
+  cases typeNamesKnown_decidable (ct.map ClassDecl.name) T with
+  | isFalse unknown =>
+      refine ⟨(fun checked => by cases checked), fun typed => ?_⟩
+      exact (unknown (hasType_wellFormed hwfct hΓwf typed)).elim
+  | isTrue known =>
       constructor
-      · intro hcheck
-        rw [List.any_eq_true] at hcheck
-        rcases hcheck with ⟨entry, _, hpred⟩
-        let _ : Decidable (IsSubtype ct entry.1 T) :=
-          isSubtype_decidable hwfct
-            (inferBasis_all_wellFormed hwfct hΓwf entry.2) hwfT
-        have hsub : IsSubtype ct entry.1 T := by
-          by_cases hsub : IsSubtype ct entry.1 T
-          · exact hsub
-          · simp [hsub] at hpred
-        exact .sub (inferBasis_sound hwfct hΓwf entry.2) hsub hwfT
-      · intro htype
-        obtain ⟨S, hS, hsub⟩ := inferBasis_complete hwfct hΓwf htype
-        rw [List.any_eq_true]
-        refine ⟨⟨S, hS⟩, by simp, ?_⟩
-        let _ : Decidable (IsSubtype ct S T) :=
-          isSubtype_decidable hwfct
-            (inferBasis_all_wellFormed hwfct hΓwf hS) hwfT
-        simp [hsub]
+      · intro checked
+        obtain ⟨source, listed, accepted⟩ := List.any_eq_true.mp checked
+        haveI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy source ⟨T, known⟩
+        have included : IsSubtype hwfct.toWellFormedClassHierarchy source.raw T := by
+          by_cases included : IsSubtype hwfct.toWellFormedClassHierarchy source.raw T
+          · exact included
+          · simp [included] at accepted
+        exact .sub ((inferBasis hwfct Γ hΓwf e).types_sound listed)
+          included
+      · intro typed
+        obtain ⟨source, listed, included⟩ := inferBasis_complete hwfct hΓwf typed
+        apply List.any_eq_true.mpr
+        refine ⟨source, listed, ?_⟩
+        haveI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy source ⟨T, known⟩
+        simp [included]
 
+/-- Decide expression typing with a valid class table and variable environment. -/
 def hasType_decidable_wfEnv
-    (hwfct : WellFormedClassTable ct)
+    (hwfct : WellTypedClassHierarchy ct)
     (hΓwf : WellFormedTyEnv ct Γ) :
-    Decidable (HasType ct Γ e T) := by
+    Decidable (HasType hwfct.toWellFormedClassHierarchy Γ e T) := by
   by_cases hcheck : checkHasType? hwfct hΓwf e T = true
   · exact isTrue ((checkHasType?_iff_hasType hwfct hΓwf).1 hcheck)
   · exact isFalse fun htype => hcheck ((checkHasType?_iff_hasType hwfct hΓwf).2 htype)

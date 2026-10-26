@@ -1,4 +1,5 @@
 import FwPython.Gradual.TypeSystem.ClassTable.WellFormednessCore
+import FwPython.Gradual.TypeSystem.IsInstanceRefinement
 import FwPython.Gradual.TypeSystem.Method.Lookup
 import FwPython.Gradual.Checked.Core
 
@@ -30,25 +31,26 @@ abbrev CheckedTyEnv.update : CheckedTyEnv → Identifier → GTy → CheckedTyEn
 
 /-! ## Checked typing judgment -/
 
-/-- `CheckedHasType gct Γ e G` asserts that under gradual class table `gct`
-    and type environment `Γ`, checked expression `e` has gradual type `G`.
+/-- Checked expression `e` has gradual type `G` under declarations `gct` and environment `Γ`.
+All argument comparisons use the supplied structural data for the erased table.
 
     This judgment covers all source-level forms plus the checked-only
     forms `enforce` and `dynAttrAccess`. Dynamic source calls are not a
     primitive checked rule; they are represented as
     `call (enforce callee ...) arg` using the ordinary `call` rule after
     the callee has been enforced to a callable type. -/
-inductive CheckedHasType : GClassTable → CheckedTyEnv → CheckedExpr → GTy → Prop where
+inductive CheckedHasType (gct : GClassTable)
+    (structural : WellFormedClassHierarchy (eraseClassTable gct)) : CheckedTyEnv → CheckedExpr → GTy → Prop where
 
   /-- Variable lookup. -/
   | var :
       Γ.lookup x = some G →
-      CheckedHasType gct Γ (.var x) G
+      CheckedHasType gct structural Γ (.var x) G
 
   /-- Constants. -/
-  | constNone : CheckedHasType gct Γ .constNone (.class_ noneClass)
-  | constTrue : CheckedHasType gct Γ .constTrue (.class_ boolClass)
-  | constFalse : CheckedHasType gct Γ .constFalse (.class_ boolClass)
+  | constNone : CheckedHasType gct structural Γ .constNone (.class_ noneClass)
+  | constTrue : CheckedHasType gct structural Γ .constTrue (.class_ boolClass)
+  | constFalse : CheckedHasType gct structural Γ .constFalse (.class_ boolClass)
 
   /-- Object creation (only non-builtin classes are allocatable). -/
   | new :
@@ -56,36 +58,36 @@ inductive CheckedHasType : GClassTable → CheckedTyEnv → CheckedExpr → GTy 
       cname ≠ boolClass →
       cname ≠ noneClass →
       cname ≠ boundMethodClass →
-      CheckedHasType gct Γ (.new cname) (.class_ cname)
+      CheckedHasType gct structural Γ (.new cname) (.class_ cname)
 
   /-- Attribute access on a class receiver yields a bound-method object.
       The raw checked machine allocates a `BoundMethod` heap object, so the
       result type is `class_ boundMethodClass`. The callable interface is
       recovered through an explicit `enforce` in the elaboration. -/
   | attrAccess :
-      CheckedHasType gct Γ base (.class_ cname) →
+      CheckedHasType gct structural Γ base (.class_ cname) →
       FindGMethodType gct cname attrName paramTy returnTy →
-      CheckedHasType gct Γ (.attrAccess base attrName) (.class_ boundMethodClass)
+      CheckedHasType gct structural Γ (.attrAccess base attrName) (.class_ boundMethodClass)
 
   /-- Attribute access on a union-of-class receiver yields a bound-method
       object. -/
   | attrAccessUnion :
-      CheckedHasType gct Γ base (.union (.class_ c1) (.class_ c2)) →
+      CheckedHasType gct structural Γ base (.union (.class_ c1) (.class_ c2)) →
       FindGMethodType gct c1 attrName p1 r1 →
       FindGMethodType gct c2 attrName p2 r2 →
-      CheckedHasType gct Γ (.attrAccess base attrName) (.class_ boundMethodClass)
+      CheckedHasType gct structural Γ (.attrAccess base attrName) (.class_ boundMethodClass)
 
   /-- Ordinary call on a callable type. -/
   | call :
-      CheckedHasType gct Γ callee
+      CheckedHasType gct structural Γ callee
         (.callable (interpTarget paramTy) (interpTarget returnTy)) →
-      CheckedHasType gct Γ arg argTy →
-      AssignableTo gct argTy (interpTarget paramTy) →
-      RuntimePublicCheckedTarget gct paramTy →
-      RuntimePublicCheckedTarget gct returnTy →
+      CheckedHasType gct structural Γ arg argTy →
+      AssignableTo gct structural argTy (interpTarget paramTy) →
+      CheckedTargetTy gct (interpTarget paramTy) →
+      CheckedTargetTy gct (interpTarget returnTy) →
       WellFormedGTy gct (interpTarget paramTy) →
       WellFormedGTy gct (interpTarget returnTy) →
-      CheckedHasType gct Γ (.call callee arg paramTy returnTy returnLabels)
+      CheckedHasType gct structural Γ (.call callee arg paramTy returnTy returnObligation)
         (interpTarget returnTy)
 
   /-- Ordinary conditional. The test must have exact type `class_ boolClass`.
@@ -93,42 +95,43 @@ inductive CheckedHasType : GClassTable → CheckedTyEnv → CheckedExpr → GTy 
       ensures only exact-bool values reach the checked `cond`. The result
       type must lie in the admissible target fragment. -/
   | cond :
-      CheckedHasType gct Γ condExpr (.class_ boolClass) →
-      CheckedHasType gct Γ thenBranch R →
-      CheckedHasType gct Γ elseBranch R →
-      RuntimePublicAnnotation gct R →
-      CheckedHasType gct Γ (.cond condExpr thenBranch elseBranch) R
+      CheckedHasType gct structural Γ condExpr (.class_ boolClass) →
+      CheckedHasType gct structural Γ thenBranch R →
+      CheckedHasType gct structural Γ elseBranch R →
+      CheckedTargetTy gct R →
+      CheckedHasType gct structural Γ (.cond condExpr thenBranch elseBranch) R
 
   /-- Instance check. -/
   | isInstance :
       Γ.lookup x = some _ →
       findGClass gct C = some cls →
-      CheckedHasType gct Γ (.isInstance x C) (.class_ boolClass)
+      CheckedHasType gct structural Γ (.isInstance x C) (.class_ boolClass)
 
   /-- Conditional + isinstance with type narrowing. Both narrowed
       types and the result type must lie in the admissible target fragment. -/
   | condIsInstance :
       Γ.lookup x = some T →
       findGClass gct C = some cls →
-      RuntimePublicAnnotation gct R →
-      RuntimePublicAnnotation gct (.intersection T (.class_ C)) →
-      RuntimePublicAnnotation gct (.intersection T (.negClass C)) →
-      CheckedHasType gct (Γ.update x (.intersection T (.class_ C))) thenBranch R →
-      CheckedHasType gct (Γ.update x (.intersection T (.negClass C))) elseBranch R →
-      CheckedHasType gct Γ (.cond (.isInstance x C) thenBranch elseBranch) R
+      CheckedTargetTy gct R →
+      CheckedTargetTy gct (isInstanceThenRefinement T C) →
+      CheckedTargetTy gct (isInstanceElseRefinement T C) →
+      CheckedHasType gct structural (Γ.update x (isInstanceThenRefinement T C)) thenBranch R →
+      CheckedHasType gct structural (Γ.update x (isInstanceElseRefinement T C)) elseBranch R →
+      CheckedHasType gct structural Γ (.cond (.isInstance x C) thenBranch elseBranch) R
 
-  /-- Enforcement: if `e : G`, then `enforce e target labels :
+  /-- Enforcement: if `e : G`, then `enforce e target obligation :
       interpTarget target`. The target type must be
       well-formed and lie in the admissible target fragment. -/
   | enforce :
-      CheckedHasType gct Γ e G →
+      CheckedHasType gct structural Γ e G →
       WellFormedGTy gct (interpTarget target) →
-      RuntimePublicCheckedTarget gct target →
-      CheckedHasType gct Γ (.enforce e target labels) (interpTarget target)
+      CheckedTargetTy gct (interpTarget target) →
+      CheckedHasType gct structural Γ (.enforce e target obligation) (interpTarget target)
 
   /-- Dynamic attribute access: regardless of the receiver's checked
-      input type, the result has type `any`. Blames `ℓ` at runtime if
-      the attribute is missing. -/
+      input type, the result has type `any`. Missing attributes produce
+      checked-machine `BlameInfo` with the stored obligation and a missing-attribute
+      cause. -/
   | dynAttrAccess :
-      CheckedHasType gct Γ base G →
-      CheckedHasType gct Γ (.dynAttrAccess base attrName ℓ) .any
+      CheckedHasType gct structural Γ base G →
+      CheckedHasType gct structural Γ (.dynAttrAccess base attrName obligation) .any

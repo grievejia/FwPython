@@ -1,66 +1,43 @@
 import FwPython.Static.TypeSystem
 import FwPython.Gradual.Embedding
 import FwPython.Gradual.Statics
+import FwPython.Gradual.TypeSystem.IsInstanceRefinement
 import FwPython.Gradual.TypeSystem.Source.Compile
 import FwPython.Gradual.TypeSystem.ClassTable.Compile
-import FwPython.Gradual.TypeSystem.Soundness
 
 /-! # Static-to-gradual embedding bridge
 
-Packages the source-facing static fragment together with the gradual
-well-formedness core needed to reuse the existing gradual elaboration and
-soundness pipeline. -/
+Proof data connecting static programs to gradual source typing and compilation. -/
 
+/-- A valid static table whose method annotations can be checked at runtime. -/
 structure EmbeddableStaticClassTable (ct : ClassTable) : Type where
-  hwf : WellFormedClassTable ct
+  /-- Inheritance, declarations, and method bodies satisfy the static rules. -/
+  hwf : WellTypedClassHierarchy ct
+  /-- Each selected method input and result translates to a permitted runtime check target. -/
   methodSigChecked : ∀ cname c m,
     findClass ct cname = some c →
     m ∈ c.methods →
-    RuntimePublicAnnotation (embedClassTable ct) (embedTy m.paramTy) ∧
-      RuntimePublicAnnotation (embedClassTable ct) (embedTy m.returnTy)
+    CheckedTargetTy (embedClassTable ct) (embedTy m.paramTy) ∧
+      CheckedTargetTy (embedClassTable ct) (embedTy m.returnTy)
 
-structure EmbeddableStaticProgram (p : Program) : Type where
-  classTable : EmbeddableStaticClassTable p.classes
-  mainTy : Ty
-  mainTyping : HasType p.classes [] p.main mainTy
-  methodBodiesTyped : ∀ cname c m,
-    findClass p.classes cname = some c →
-    m ∈ c.methods →
-    HasType p.classes
-      [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
-      m.body
-      m.returnTy
+/-- Name-valid static annotations embed as valid gradual annotations in a hierarchy. -/
+theorem wellFormedGTy_embedTy (structural : WellFormedClassHierarchy ct)
+    (valid : WellFormedTy ct T) : WellFormedGTy (embedClassTable ct) (embedTy T) := by
+  induction valid with
+  | bottom => exact .bottom
+  | class_ known =>
+      let selected := structural.lookupKnown _ known
+      exact .class_ (findGClass_embedClassTable selected.hfind)
+        (computeGMro_embedClassTable selected.hmro)
+  | negClass known =>
+      let selected := structural.lookupKnown _ known
+      exact .negClass (findGClass_embedClassTable selected.hfind)
+        (computeGMro_embedClassTable selected.hmro)
+  | union _ _ left right => exact .union left right
+  | intersection _ _ left right => exact .intersection left right
+  | callable _ _ input result => exact .callable input result
 
-theorem wellFormedGTy_embedTy
-    (h : WellFormedTy ct T) :
-    WellFormedGTy (embedClassTable ct) (embedTy T) := by
-  induction T with
-  | class_ cname =>
-      cases h with
-      | class_ hfind hmro =>
-          exact .class_ (findGClass_embedClassTable hfind) (computeGMro_embedClassTable hmro)
-  | callable P R ihP ihR =>
-      cases h with
-      | callable hwfP hwfR =>
-          exact .callable (ihP hwfP) (ihR hwfR)
-  | union T U ihT ihU =>
-      cases h with
-      | union hwfT hwfU =>
-          exact .union (ihT hwfT) (ihU hwfU)
-  | intersection T U ihT ihU =>
-      cases h with
-      | intersection hwfT hwfU =>
-          exact .intersection (ihT hwfT) (ihU hwfU)
-  | bottom =>
-      cases h with
-      | bottom =>
-          exact .bottom
-  | negClass cname =>
-      cases h with
-      | negClass hfind hmro =>
-          exact .negClass (findGClass_embedClassTable hfind) (computeGMro_embedClassTable hmro)
-
-private theorem computeMro_embedClassTable_reverse {ct : ClassTable}
+theorem computeMro_embedClassTable_reverse {ct : ClassTable}
     {cname : Identifier} {c : Class} {mro : List Identifier}
     (hfind : findClass ct cname = some c)
     (h : GComputeMro (embedClassTable ct) (embedClass c) mro) :
@@ -105,7 +82,7 @@ private theorem findMethodInList_embedMethods_reverse
       cases h
       exact ⟨m, rfl, rfl⟩
 
-private theorem findMethodInMro_embed_reverse {ct : ClassTable}
+theorem findMethodInMro_embed_reverse {ct : ClassTable}
     {mro : List Identifier} {mname : Identifier} {gm : GMethod}
     (h : findGMethodInMro (embedClassTable ct) mro mname = some gm) :
     ∃ m, findMethodInMro ct mro mname = some m ∧ embedMethod m = gm :=
@@ -134,18 +111,18 @@ private def wellFormedGClassTable_embedClassTable
   objectExists := by
     obtain ⟨c, hfind, hbases⟩ := hemb.hwf.objectExists
     exact ⟨embedClass c, findGClass_embedClassTable hfind, by simpa [embedClass] using hbases⟩
-  boolExists := by
-    exact ⟨embedClass hemb.hwf.boolExists.cls,
+  boolExists :=
+    ⟨embedClass hemb.hwf.boolExists.cls,
       hemb.hwf.boolExists.mro,
       findGClass_embedClassTable hemb.hwf.boolExists.hfind,
       computeGMro_embedClassTable hemb.hwf.boolExists.hmro⟩
-  noneExists := by
-    exact ⟨embedClass hemb.hwf.noneExists.cls,
+  noneExists :=
+    ⟨embedClass hemb.hwf.noneExists.cls,
       hemb.hwf.noneExists.mro,
       findGClass_embedClassTable hemb.hwf.noneExists.hfind,
       computeGMro_embedClassTable hemb.hwf.noneExists.hmro⟩
-  boundMethodExists := by
-    exact ⟨embedClass hemb.hwf.boundMethodExists.cls,
+  boundMethodExists :=
+    ⟨embedClass hemb.hwf.boundMethodExists.cls,
       hemb.hwf.boundMethodExists.mro,
       findGClass_embedClassTable hemb.hwf.boundMethodExists.hfind,
       computeGMro_embedClassTable hemb.hwf.boundMethodExists.hmro⟩
@@ -170,28 +147,17 @@ private def wellFormedGClassTable_embedClassTable
     obtain ⟨c, hfind, hgc⟩ := findClass_embedClassTable_reverse hfindG
     subst hgc
     simpa [embedClass] using hemb.hwf.baseClassesDistinct cname c hfind
-  boolLeaf := by
-    intro cname gc mro hfindG hmroG hmem
+  sealedLeaf := by
+    intro builtin sealed cname gc mro hfindG hmroG hmem
     obtain ⟨c, hfind, hgc⟩ := findClass_embedClassTable_reverse hfindG
     subst hgc
-    exact hemb.hwf.builtinsLeaf cname c mro hfind
-      (computeMro_embedClassTable_reverse hfind hmroG) hmem
-  noneLeaf := by
-    intro cname gc mro hfindG hmroG hmem
-    obtain ⟨c, hfind, hgc⟩ := findClass_embedClassTable_reverse hfindG
-    subst hgc
-    exact hemb.hwf.noneLeaf cname c mro hfind
-      (computeMro_embedClassTable_reverse hfind hmroG) hmem
-  boundMethodLeaf := by
-    intro cname gc mro hfindG hmroG hmem
-    obtain ⟨c, hfind, hgc⟩ := findClass_embedClassTable_reverse hfindG
-    subst hgc
-    exact hemb.hwf.boundMethodLeaf cname c mro hfind
+    exact hemb.hwf.sealedLeaf builtin sealed cname c mro hfind
       (computeMro_embedClassTable_reverse hfind hmroG) hmem
 
 private theorem gradualLiskovCondition_embedClassTable
     (hemb : EmbeddableStaticClassTable ct) :
-    GradualLiskovCondition (embedClassTable ct) := by
+    GradualLiskovCondition (embedClassTable ct)
+      (eraseClassTable_structural (wellFormedGClassTable_embedClassTable hemb)) := by
   intro cname aname c_cls a_cls mro_c mro_a methodName m_c m_a
     hfindC hmroC hmemA hfindA hmroA hlookupC hlookupA
   obtain ⟨c, hfindC', hc⟩ := findClass_embedClassTable_reverse hfindC
@@ -230,13 +196,19 @@ def wellFormedGClassTableCore_embedClassTable
     subst hgc
     rcases List.mem_map.mp hmem with ⟨m, hm, rfl⟩
     obtain ⟨hwfP, hwfR⟩ := hemb.hwf.allMethodSignaturesWellFormed cname c m hfind hm
-    exact ⟨wellFormedGTy_embedTy hwfP, wellFormedGTy_embedTy hwfR⟩
-  allMethodSignaturesRuntimePublic := by
+    exact ⟨wellFormedGTy_embedTy hemb.hwf.toWellFormedClassHierarchy hwfP, wellFormedGTy_embedTy hemb.hwf.toWellFormedClassHierarchy hwfR⟩
+  allMethodSignaturesCheckedTarget := by
     intro cname gc gm hfindG hmem
     obtain ⟨c, hfind, hgc⟩ := findClass_embedClassTable_reverse hfindG
     subst hgc
     rcases List.mem_map.mp hmem with ⟨m, hm, rfl⟩
     exact hemb.methodSigChecked cname c m hfind hm
+
+/-- Recover the static table's structural data from its embedded gradual table.
+All static types in an expression bridge use this same data. -/
+def WellFormedGClassTableCore.toOriginalWellFormedClassHierarchy {ct : ClassTable}
+    (core : WellFormedGClassTableCore (embedClassTable ct)) : WellFormedClassHierarchy ct :=
+  wellFormedClassHierarchy_eraseEmbed_reverse core.toWellFormedClassHierarchy
 
 def embedTyEnv : TyEnv → SBindingEnv
   | [] => []
@@ -259,12 +231,6 @@ theorem embedTyEnv_lookupBinding
           simpa [NamedEnv.lookup, hhd] using h
         simpa [embedTyEnv, SBindingEnv.lookupBinding, hhd] using ih htail
 
-theorem embedTyEnv_lookupSource
-    {Γ : TyEnv} {x : Identifier} {T : Ty}
-    (h : Γ.lookup x = some T) :
-    (embedTyEnv Γ).lookupSource x = some (embedTy T) := by
-  simp [SBindingEnv.lookupSource, embedTyEnv_lookupBinding h]
-
 theorem embedTyEnv_update
     (Γ : TyEnv) (x : Identifier) (T : Ty) :
     embedTyEnv (Γ.update x T) =
@@ -281,115 +247,60 @@ theorem embedTyEnv_update_class
     (Γ : TyEnv) (x : Identifier) (T : Ty) (C : Identifier) :
     embedTyEnv (Γ.update x (.intersection T (.class_ C))) =
       (embedTyEnv Γ).updateSource x
-        (.intersection (embedTy T) (.class_ C)) := by
-  simpa [embedTy] using
-    embedTyEnv_update Γ x (.intersection T (.class_ C))
+        (.intersection (embedTy T) (.class_ C)) :=
+  embedTyEnv_update Γ x (.intersection T (.class_ C))
 
 theorem embedTyEnv_update_negClass
     (Γ : TyEnv) (x : Identifier) (T : Ty) (C : Identifier) :
     embedTyEnv (Γ.update x (.intersection T (.negClass C))) =
       (embedTyEnv Γ).updateSource x
-        (.intersection (embedTy T) (.negClass C)) := by
-  simpa [embedTy] using
-    embedTyEnv_update Γ x (.intersection T (.negClass C))
-
-theorem sourceEnvOk_embedTyEnv_update_class
-    (hwfct : WellFormedClassTable ct)
-    (henv : SourceEnvOk (embedClassTable ct) (embedTyEnv Γ))
-    (hlook : Γ.lookup x = some T)
-    (hfind : findClass ct C = some c) :
-    SourceEnvOk
-      (embedClassTable ct)
-      (embedTyEnv (Γ.update x (.intersection T (.class_ C)))) := by
-  have hb := sourceEnvOk_lookup henv (embedTyEnv_lookupBinding hlook)
-  have hmroC := (hwfct.allMrosExist _ _ hfind).hmro
-  have hclassWf :
-      WellFormedGTy (embedClassTable ct) (.class_ C) :=
-    wellFormedGTy_embedTy (ct := ct) (T := .class_ C) (.class_ hfind hmroC)
-  have hnewSrc :
-      SourceCallableTy (embedClassTable ct)
-        (.intersection (embedTy T) (.class_ C)) :=
-    .intersection hb.1 .class_
-  have hnewWf :
-      WellFormedGTy (embedClassTable ct)
-        (.intersection (embedTy T) (.class_ C)) :=
-    .intersection hb.2 hclassWf
-  have henv' :=
-    sourceEnvOk_updateSource henv (embedTyEnv_lookupBinding hlook) hnewSrc hnewWf
-  simpa [embedTyEnv_update_class] using henv'
-
-theorem sourceEnvOk_embedTyEnv_update_negClass
-    (hwfct : WellFormedClassTable ct)
-    (henv : SourceEnvOk (embedClassTable ct) (embedTyEnv Γ))
-    (hlook : Γ.lookup x = some T)
-    (hfind : findClass ct C = some c) :
-    SourceEnvOk
-      (embedClassTable ct)
-      (embedTyEnv (Γ.update x (.intersection T (.negClass C)))) := by
-  have hb := sourceEnvOk_lookup henv (embedTyEnv_lookupBinding hlook)
-  have hmroC := (hwfct.allMrosExist _ _ hfind).hmro
-  have hnegWf :
-      WellFormedGTy (embedClassTable ct) (.negClass C) :=
-    wellFormedGTy_embedTy (ct := ct) (T := .negClass C) (.negClass hfind hmroC)
-  have hnewSrc :
-      SourceCallableTy (embedClassTable ct)
         (.intersection (embedTy T) (.negClass C)) :=
-    .intersection hb.1 .negClass
-  have hnewWf :
-      WellFormedGTy (embedClassTable ct)
-        (.intersection (embedTy T) (.negClass C)) :=
-    .intersection hb.2 hnegWf
-  have henv' :=
-    sourceEnvOk_updateSource henv (embedTyEnv_lookupBinding hlook) hnewSrc hnewWf
-  simpa [embedTyEnv_update_negClass] using henv'
+  embedTyEnv_update Γ x (.intersection T (.negClass C))
 
-theorem empty_embedTyEnv_ok :
-    SourceEnvOk (embedClassTable ct) (embedTyEnv ([] : TyEnv)) := by
-  intro b hb
-  cases hb
+theorem embedTyEnv_update_isInstanceThen
+    (Γ : TyEnv) (x : Identifier) (T : Ty) (C : Identifier) :
+    embedTyEnv (Γ.update x (.intersection T (.class_ C))) =
+      (embedTyEnv Γ).updateSource x
+        (isInstanceThenRefinement (embedTy T) C) := by
+  rw [embedTyEnv_update_class, ← isInstanceThenRefinement_embedTy T C]
 
-theorem methodEntry_embedTyEnv_ok
-    (hemb : EmbeddableStaticClassTable ct)
-    (hfind : findClass ct cname = some c)
-    (hm : m ∈ c.methods) :
-    SourceEnvOk
-      (embedClassTable ct)
-      (embedTyEnv [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]) := by
-  have hchecked := hemb.methodSigChecked cname c m hfind hm
-  have hwfSig := hemb.hwf.allMethodSignaturesWellFormed cname c m hfind hm
-  have hmroC := (hemb.hwf.allMrosExist _ _ hfind).hmro
-  intro b hb
-  simp [embedTyEnv] at hb
-  rcases hb with rfl | rfl
-  · exact ⟨runtimePublicAnnotation_to_sourceCallableTy _ hchecked.1,
-      wellFormedGTy_embedTy hwfSig.1⟩
-  · exact ⟨.class_, wellFormedGTy_embedTy (.class_ hfind hmroC)⟩
+theorem embedTyEnv_update_isInstanceElse
+    (Γ : TyEnv) (x : Identifier) (T : Ty) (C : Identifier) :
+    embedTyEnv (Γ.update x (.intersection T (.negClass C))) =
+      (embedTyEnv Γ).updateSource x
+        (isInstanceElseRefinement (embedTy T) C) := by
+  rw [embedTyEnv_update_negClass, ← isInstanceElseRefinement_embedTy T C]
 
-inductive ViewOnSrc (ct : ClassTable) : Ty → GTy → Type where
+/-- Connect a directly derived static type to its gradual source type.
+`EmbeddedExprBridge.output_subtype` separately proves that the directly derived type
+is a subtype of the type requested by the caller. -/
+inductive CoreViewOnSrc (ct : ClassTable) : Ty → GTy → Type where
+  /-- The expression has a static type and unknown gradual source type. -/
+  | any :
+      CoreViewOnSrc ct T .any
+  /-- Translate the static type directly into gradual source syntax. -/
   | embed :
-      ViewOnSrc ct T (embedTy T)
-  | sub :
-      IsSubtype ct S T →
-      ViewOnSrc ct S G →
-      ViewOnSrc ct T G
-  | unionStruct :
-      ViewOnSrc ct T G →
-      ViewOnSrc ct U H →
-      ViewOnSrc ct (.union T U) (.union G H)
-  | join :
-      ViewOnSrc ct T G →
-      ViewOnSrc ct U H →
-      ViewOnSrc ct (.union T U) (.union G H)
+      CoreViewOnSrc ct T (embedTy T)
+  /-- Connect the two static union members to the corresponding gradual union members. -/
+  | union :
+      CoreViewOnSrc ct T G →
+      CoreViewOnSrc ct U H →
+      CoreViewOnSrc ct (.union T U) (.union G H)
+  /-- The expression has both static types and the same gradual source type. -/
   | interIntro :
-      ViewOnSrc ct T G →
-      ViewOnSrc ct U G →
-      ViewOnSrc ct (.intersection T U) G
+      CoreViewOnSrc ct T G →
+      CoreViewOnSrc ct U G →
+      CoreViewOnSrc ct (.intersection T U) G
 
+/-- The method type selected from a receiver type.
+The indices state the receiver type, attribute name, and selected method type. -/
 inductive AttrSelection (ct : ClassTable) :
     Ty → Identifier → Ty → Type where
+  /-- Find the method on the named receiver class. -/
   | class_ :
       FindMethodType ct cname attrName paramTy returnTy →
       AttrSelection ct (.class_ cname) attrName (.callable paramTy returnTy)
+  /-- Either receiver class can supply the method; retain both possible method types. -/
   | union :
       FindMethodType ct c1 attrName p1 r1 →
       FindMethodType ct c2 attrName p2 r2 →
@@ -397,6 +308,7 @@ inductive AttrSelection (ct : ClassTable) :
         (.union (.class_ c1) (.class_ c2))
         attrName
         (.union (.callable p1 r1) (.callable p2 r2))
+  /-- The receiver has both class types; its method satisfies both selected types. -/
   | inter :
       FindMethodType ct c1 attrName p1 r1 →
       FindMethodType ct c2 attrName p2 r2 →
@@ -405,515 +317,554 @@ inductive AttrSelection (ct : ClassTable) :
         attrName
         (.intersection (.callable p1 r1) (.callable p2 r2))
 
-inductive CallSelection (ct : ClassTable) :
+/-- A selected method type uses valid class names in its input and result. -/
+theorem attrSelection_result_wellFormed
+    (tableValid : WellTypedClassHierarchy ct)
+    (selection : AttrSelection ct receiverTy attributeName resultTy) :
+    WellFormedTy ct resultTy := by
+  cases selection with
+  | class_ method => exact findMethodType_wellFormed tableValid method
+  | union left right =>
+      exact .union (findMethodType_wellFormed tableValid left)
+        (findMethodType_wellFormed tableValid right)
+  | inter left right =>
+      exact .intersection (findMethodType_wellFormed tableValid left)
+        (findMethodType_wellFormed tableValid right)
+
+/-- An input and result requirement justified by a static callee type.
+The three type indices are the callee type, input type, and result type. -/
+inductive CallSelection {ct : ClassTable} (structural : WellFormedClassHierarchy ct) :
     Ty → Ty → Ty → Type where
+  /-- The callee type has no values. Equation subtyping to bottom proves this fact. -/
+  | empty :
+      IsSubtype structural calleeTy .bottom →
+      CallSelection structural calleeTy paramTy .bottom
+  /-- Use the input and result types of the function directly. -/
   | callable :
-      CallSelection ct (.callable paramTy returnTy) paramTy returnTy
+      CallSelection structural (.callable paramTy returnTy) paramTy returnTy
+  /-- The actual function can come from either alternative.
+  The input must fit both parameter types. The result can have either result type. -/
   | union :
-      CallSelection ct calleeTy₁ paramTy₁ returnTy₁ →
-      CallSelection ct calleeTy₂ paramTy₂ returnTy₂ →
-      CallSelection ct
+      CallSelection structural calleeTy₁ paramTy₁ returnTy₁ →
+      CallSelection structural calleeTy₂ paramTy₂ returnTy₂ →
+      CallSelection structural
         (.union calleeTy₁ calleeTy₂)
         (.intersection paramTy₁ paramTy₂)
         (.union returnTy₁ returnTy₂)
+  /-- The left alternative has no values. Use the right requirement. -/
+  | union_empty_left :
+      IsSubtype structural emptyTy .bottom →
+      CallSelection structural calleeTy paramTy returnTy →
+      CallSelection structural (.union emptyTy calleeTy) paramTy returnTy
+  /-- The right alternative has no values. Use the left requirement. -/
+  | union_empty_right :
+      IsSubtype structural emptyTy .bottom →
+      CallSelection structural calleeTy paramTy returnTy →
+      CallSelection structural (.union calleeTy emptyTy) paramTy returnTy
+  /-- The same function has both types. Use the left input and result requirement. -/
   | inter_left :
-      CallSelection ct calleeTy₁ paramTy returnTy →
-      CallSelection ct
+      CallSelection structural calleeTy₁ paramTy returnTy →
+      CallSelection structural
         (.intersection calleeTy₁ calleeTy₂)
         paramTy
         returnTy
+  /-- The same function has both types. Use the right input and result requirement. -/
   | inter_right :
-      CallSelection ct calleeTy₂ paramTy returnTy →
-      CallSelection ct
+      CallSelection structural calleeTy₂ paramTy returnTy →
+      CallSelection structural
         (.intersection calleeTy₁ calleeTy₂)
         paramTy
         returnTy
+  /-- Use two requirements of the same function.
+  The input must fit both parameter types. The result must have both result types. -/
+  | inter_shared :
+      CallSelection structural calleeTy paramTy₁ returnTy₁ →
+      CallSelection structural calleeTy paramTy₂ returnTy₂ →
+      CallSelection structural
+        calleeTy
+        (.intersection paramTy₁ paramTy₂)
+        (.intersection returnTy₁ returnTy₂)
+  /-- The same function satisfies both requirements.
+  Permit inputs of either parameter type and results of either result type. -/
+  | inter_correlated :
+      CallSelection structural calleeTy₁ paramTy₁ returnTy₁ →
+      CallSelection structural calleeTy₂ paramTy₂ returnTy₂ →
+      CallSelection structural
+        (.intersection calleeTy₁ calleeTy₂)
+        (.union paramTy₁ paramTy₂)
+        (.union returnTy₁ returnTy₂)
 
+/-- A selection from valid callee and input types implies its stated function requirement. -/
+theorem callSelection_subtype_callable {structural : WellFormedClassHierarchy ct}
+    (selection : CallSelection structural calleeTy paramTy returnTy)
+    (calleeValid : WellFormedTy ct calleeTy) (inputValid : WellFormedTy ct paramTy) :
+    IsSubtype structural calleeTy (.callable paramTy returnTy) := by
+  induction selection with
+  | empty empty => exact .trans empty (.bottom (.callable inputValid .bottom))
+  | callable => exact .refl calleeValid
+  | union _ _ ihLeft ihRight =>
+      have left := ihLeft calleeValid.union_left inputValid.intersection_left
+      have right := ihRight calleeValid.union_right inputValid.intersection_right
+      exact .unionElim
+        (.trans left (.callable (.interLeft (.refl inputValid.intersection_left) inputValid.intersection_right)
+          (.unionLeft (.refl left.targetWellFormed.callable_return) right.targetWellFormed.callable_return)))
+        (.trans right (.callable (.interRight (.refl inputValid.intersection_right) inputValid.intersection_left)
+          (.unionRight (.refl right.targetWellFormed.callable_return) left.targetWellFormed.callable_return)))
+  | union_empty_left empty _ ih =>
+      have selected := ih calleeValid.union_right inputValid
+      exact .unionElim (.trans empty (.bottom selected.targetWellFormed)) selected
+  | union_empty_right empty _ ih =>
+      have selected := ih calleeValid.union_left inputValid
+      exact .unionElim selected (.trans empty (.bottom selected.targetWellFormed))
+  | inter_left _ ih =>
+      exact .interLeft (ih calleeValid.intersection_left inputValid) calleeValid.intersection_right
+  | inter_right _ ih =>
+      exact .interRight (ih calleeValid.intersection_right inputValid) calleeValid.intersection_left
+  | inter_shared _ _ ihLeft ihRight =>
+      have left := ihLeft calleeValid inputValid.intersection_left
+      have right := ihRight calleeValid inputValid.intersection_right
+      exact .callableMeet left right
+  | inter_correlated _ _ ihLeft ihRight =>
+      have left := ihLeft calleeValid.intersection_left inputValid.union_left
+      have right := ihRight calleeValid.intersection_right inputValid.union_right
+      exact .trans
+        (.interMono left right)
+        (.callableCorrelatedSummary inputValid.union_left inputValid.union_right
+          left.targetWellFormed.callable_return right.targetWellFormed.callable_return)
+
+/-- Proof data connecting a static expression to its gradual source typing.
+The first static type is proved directly for the expression.
+The final static type can be a less specific type requested by the caller. -/
+inductive EmbeddedExprBridgeCore
+    (ct : ClassTable)
+    (hwfct : WellFormedGClassTableCore (embedClassTable ct)) :
+    (Γ : TyEnv) → (e : Expr) → (producerTy : Ty) → (srcTy : GTy) →
+      GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy →
+      (advertisedTy : Ty) → Type where
+  /-- The variable has the type assigned by its static environment. -/
+  | var
+      -- The variable lookup gives its directly derived static type.
+      (lookup : Γ.lookup x = some producerTy)
+      -- The variable type is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy producerTy advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.var x) producerTy (embedTy producerTy)
+        (GSrcInfer.var (embedTyEnv_lookupBinding lookup)) advertisedTy
+  /-- Translate None with its static and source types. -/
+  | constNone
+      -- NoneType is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.class_ noneClass) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ .constNone (.class_ noneClass)
+        (.class_ noneClass) GSrcInfer.constNone advertisedTy
+  /-- Translate True with its static and source types. -/
+  | constTrue
+      -- Bool is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.class_ boolClass) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ .constTrue (.class_ boolClass)
+        (.class_ boolClass) GSrcInfer.constTrue advertisedTy
+  /-- Translate False with its static and source types. -/
+  | constFalse
+      -- Bool is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.class_ boolClass) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ .constFalse (.class_ boolClass)
+        (.class_ boolClass) GSrcInfer.constFalse advertisedTy
+  /-- Translate allocation of an ordinary user class. -/
+  | new
+      -- Static lookup for the allocated class.
+      (class_lookup : findClass ct cname = some c)
+      -- Source lookup for the embedded allocated class.
+      (source_lookup : findGClass (embedClassTable ct) cname = some sourceClass)
+      -- The allocated class is not the builtin `Bool` class.
+      (notBool : cname ≠ boolClass)
+      -- The allocated class is not the builtin `None` class.
+      (notNone : cname ≠ noneClass)
+      -- The allocated class is not the runtime bound-method class.
+      (notBoundMethod : cname ≠ boundMethodClass)
+      -- The allocated class type is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.class_ cname) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.new cname) (.class_ cname)
+        (embedTy (.class_ cname))
+        (GSrcInfer.new source_lookup notBool notNone notBoundMethod)
+        advertisedTy
+  /-- Translation proof for attribute access.
+  Compute the source result from the receiver's gradual type.
+  Keep both the directly derived static result and the result requested by the caller. -/
+  | attrAccess
+      -- Source inference for the receiver expression.
+      (receiverHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr base) receiverSrc)
+      -- Proofs connecting the receiver's static and source types.
+      (receiver :
+        EmbeddedExprBridgeCore ct hwfct Γ base receiverProducer receiverSrc
+          receiverHsrc receiverAdvertised)
+      -- The attribute type selected from the directly derived receiver type.
+      (producerSelection :
+        AttrSelection ct receiverProducer attrName producerResult)
+      -- The source attribute check gives this result type.
+      (attr_source_eq :
+        attrSourceTy? (embedClassTable ct) receiverSrc attrName =
+          some producerSrcResult)
+      -- The relation between the directly derived static and source result types.
+      (result_view : CoreViewOnSrc ct producerResult producerSrcResult)
+      -- The directly derived result is a subtype of the requested result.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy producerResult advertisedResult) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.attrAccess base attrName)
+        producerResult producerSrcResult
+        (GSrcInfer.attrAccess receiverHsrc attr_source_eq)
+        advertisedResult
+  /-- Translation proof for a call.
+  Compute its source result from the function and argument source types. -/
+  | call
+      -- The function expression has this gradual source type.
+      (calleeHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr callee) calleeSrc)
+      -- Proofs connecting the function's static and source types.
+      (calleeBridge :
+        EmbeddedExprBridgeCore ct hwfct Γ callee calleeProducer calleeSrc
+          calleeHsrc calleeAdvertised)
+      -- The argument expression has this gradual source type.
+      (argumentHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr arg) argumentSrc)
+      -- Proofs connecting the argument's static and source types.
+      (argumentBridge :
+        EmbeddedExprBridgeCore ct hwfct Γ arg argumentProducer argumentSrc
+          argumentHsrc argumentAdvertised)
+      -- The input and result types selected from the directly derived function type.
+      (producerSelection :
+        CallSelection hwfct.toOriginalWellFormedClassHierarchy calleeProducer producerParam producerReturn)
+      -- The directly derived argument type is a subtype of the selected parameter type.
+      (argument_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy argumentProducer producerParam)
+      -- The source call check gives this result type.
+      (call_source_eq :
+        callSourceTy? (embedClassTable ct) calleeSrc argumentSrc hwfct
+          = some callSrcResult)
+      -- The relation between the directly derived static and source result types.
+      (return_view : CoreViewOnSrc ct producerReturn callSrcResult)
+      -- The directly derived result is a subtype of the requested result.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy producerReturn advertisedReturn) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.call callee arg)
+        producerReturn callSrcResult
+        (GSrcInfer.call calleeHsrc argumentHsrc call_source_eq)
+        advertisedReturn
+  /-- Translation proof for an ordinary conditional.
+  Its static and source result types are the corresponding unions of the branch types. -/
+  | cond
+      -- The condition expression is not an `isInstance` test.
+      (test_not_isInstance : (embedExpr condition).notIsInstance)
+      -- Source inference for the condition expression.
+      (conditionHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr condition) conditionSrc)
+      -- Bridge for the condition expression.
+      (conditionBridge :
+        EmbeddedExprBridgeCore ct hwfct Γ condition conditionProducer conditionSrc
+          conditionHsrc conditionAdvertised)
+      -- The directly derived condition type is a subtype of Bool.
+      (condition_bool_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy conditionProducer (.class_ boolClass))
+      -- Source compatibility of the condition source type with `Bool`.
+      (test_assignable :
+        AssignableTo (embedClassTable ct) hwfct.toWellFormedClassHierarchy conditionSrc (.class_ boolClass))
+      -- Source inference for the `then` branch.
+      (thenHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr thenBranch) thenSrc)
+      -- Bridge for the `then` branch.
+      (thenBridge :
+        EmbeddedExprBridgeCore ct hwfct Γ thenBranch thenProducer thenSrc
+          thenHsrc thenAdvertised)
+      -- Source inference for the `else` branch.
+      (elseHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr elseBranch) elseSrc)
+      -- Bridge for the `else` branch.
+      (elseBridge :
+        EmbeddedExprBridgeCore ct hwfct Γ elseBranch elseProducer elseSrc
+          elseHsrc elseAdvertised)
+      -- The union of the directly derived branch types is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.union thenProducer elseProducer) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.cond condition thenBranch elseBranch)
+        (.union thenProducer elseProducer) (.union thenSrc elseSrc)
+        (GSrcInfer.cond test_not_isInstance conditionHsrc test_assignable
+          thenHsrc elseHsrc)
+        advertisedTy
+  /-- Translate a class membership test with a Bool result. -/
+  | isInstance
+      -- Static lookup for the tested variable.
+      (lookup : Γ.lookup x = some variableTy)
+      -- Static lookup for the tested class.
+      (class_lookup : findClass ct C = some c)
+      -- Source lookup for the embedded tested class.
+      (source_class_lookup : findGClass (embedClassTable ct) C = some sourceClass)
+      -- Bool is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.class_ boolClass) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ (.isInstance x C) (.class_ boolClass)
+        (.class_ boolClass)
+        (GSrcInfer.isInstance (embedTyEnv_lookupBinding lookup) source_class_lookup)
+        advertisedTy
+  /-- Conditional `isInstance` bridge with source and static refinements. -/
+  | condIsInstance
+      -- Static lookup for the refined variable.
+      (lookup : Γ.lookup x = some variableTy)
+      -- Static lookup for the refined class.
+      (class_lookup : findClass ct C = some c)
+      -- Source lookup for the embedded refined class.
+      (source_class_lookup : findGClass (embedClassTable ct) C = some sourceClass)
+      -- The positive branch has this source type after adding class membership information.
+      (thenHsrc :
+        GSrcInfer (embedClassTable ct) hwfct
+          (embedTyEnv (Γ.update x (.intersection variableTy (.class_ C))))
+          (embedExpr thenBranch) thenSrc)
+      -- Bridge for the positive branch under the refined static environment.
+      (thenBridge :
+        EmbeddedExprBridgeCore ct hwfct
+          (Γ.update x (.intersection variableTy (.class_ C)))
+          thenBranch thenProducer thenSrc thenHsrc thenAdvertised)
+      -- Source inference for the negative branch under the refined source environment.
+      (elseHsrc :
+        GSrcInfer (embedClassTable ct) hwfct
+          (embedTyEnv (Γ.update x (.intersection variableTy (.negClass C))))
+          (embedExpr elseBranch) elseSrc)
+      -- Bridge for the negative branch under the refined static environment.
+      (elseBridge :
+        EmbeddedExprBridgeCore ct hwfct
+          (Γ.update x (.intersection variableTy (.negClass C)))
+          elseBranch elseProducer elseSrc elseHsrc elseAdvertised)
+      -- The union of the directly derived branch types is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.union thenProducer elseProducer) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ
+        (.cond (.isInstance x C) thenBranch elseBranch)
+        (.union thenProducer elseProducer) (.union thenSrc elseSrc)
+        (GSrcInfer.condIsInstance
+          (embedTyEnv_lookupBinding lookup)
+          source_class_lookup
+          (cast (by
+            rw [embedTyEnv_update_isInstanceThen
+              (Γ := Γ) (x := x) (T := variableTy) (C := C)])
+            thenHsrc)
+          (cast (by
+            rw [embedTyEnv_update_isInstanceElse
+              (Γ := Γ) (x := x) (T := variableTy) (C := C)])
+            elseHsrc))
+        advertisedTy
+  /-- Intersection introduction bridge for one checked source expression. -/
+  | interIntro
+      -- The source typing proof chosen for this expression.
+      (leftHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr e) sharedSrc)
+      -- Proofs connecting the left static type to the source type.
+      (left :
+        EmbeddedExprBridgeCore ct hwfct Γ e leftProducer sharedSrc
+          leftHsrc leftAdvertised)
+      -- The second typing proof gives the same source type.
+      (rightHsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr e) sharedSrc)
+      -- Proofs connecting the right static type to the same source type.
+      (right :
+        EmbeddedExprBridgeCore ct hwfct Γ e rightProducer sharedSrc
+          rightHsrc rightAdvertised)
+      -- The intersection of the directly derived types is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy (.intersection leftProducer rightProducer) advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ e
+        (.intersection leftProducer rightProducer) sharedSrc leftHsrc advertisedTy
+  /-- Prove that the directly derived static type is a subtype of the requested type.
+  Keep the same source expression and source typing proof. -/
+  | sub
+      -- Source inference inherited from the inner bridge.
+      (hsrc :
+        GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ)
+          (embedExpr e) srcTy)
+      -- The inner translation proof supplies the same directly derived static and source types.
+      (inner :
+        EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc innerAdvertised)
+      -- The directly derived static type is a subtype of the requested type.
+      (output_subtype : IsSubtype hwfct.toOriginalWellFormedClassHierarchy producerTy advertisedTy) :
+      EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy
+
+/-- A static expression type, its gradual source type, and the proofs that connect them. -/
 structure EmbeddedExprBridge
     (ct : ClassTable)
     (hwfct : WellFormedGClassTableCore (embedClassTable ct))
-    (Γ : TyEnv) (e : Expr) (T : Ty) : Type where
+    (Γ : TyEnv) (e : Expr) (advertisedTy : Ty) : Type where
+  /-- The static type proved directly for the expression. -/
+  producerTy : Ty
+  /-- The type computed for the expression in gradual source syntax. -/
   srcTy : GTy
-  hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy
-  view : ViewOnSrc ct T srcTy
-  srcSource : SourceCallableTy (embedClassTable ct) srcTy
-  srcWellFormed : WellFormedGTy (embedClassTable ct) srcTy
+  /-- The source typing proof supplied to `compileCheck`. -/
+  hsrc :
+    GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy
+  /-- Proofs connecting the static type, source type, and type requested by the caller. -/
+  core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy
 
-inductive ExprProvenance
-    (ct : ClassTable)
-    (hwfct : WellFormedGClassTableCore (embedClassTable ct)) :
-    {Γ : TyEnv} →
-    {e : Expr} → {T : Ty} →
-    EmbeddedExprBridge ct hwfct Γ e T → Type where
-  | var
-      {Γ : TyEnv}
-      {x : Identifier}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.var x) T) :
-      ExprProvenance ct hwfct bridge
-  | constNone
-      {Γ : TyEnv}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ .constNone T) :
-      ExprProvenance ct hwfct bridge
-  | constTrue
-      {Γ : TyEnv}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ .constTrue T) :
-      ExprProvenance ct hwfct bridge
-  | constFalse
-      {Γ : TyEnv}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ .constFalse T) :
-      ExprProvenance ct hwfct bridge
-  | new
-      {Γ : TyEnv}
-      {cname : Identifier}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.new cname) T) :
-      ExprProvenance ct hwfct bridge
-  | attrAccess
-      {Γ : TyEnv}
-      {baseExpr : Expr}
-      {recvTy resultTy : Ty}
-      {attrName : Identifier}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.attrAccess baseExpr attrName) resultTy)
-      (base : EmbeddedExprBridge ct hwfct Γ baseExpr recvTy)
-      (pbase : ExprProvenance ct hwfct base)
-      (hselect : AttrSelection ct recvTy attrName resultTy)
-      (hattr : attrSourceTy? (embedClassTable ct) base.srcTy attrName = some bridge.srcTy)
-      (hhsrc : HEq bridge.hsrc (GSrcInfer.attrAccess base.hsrc hattr)) :
-      ExprProvenance ct hwfct bridge
-  | call
-      {Γ : TyEnv}
-      {calleeExpr argExpr : Expr}
-      {calleeTy argTy paramTy returnTy : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.call calleeExpr argExpr) returnTy)
-      (callee : EmbeddedExprBridge ct hwfct Γ calleeExpr calleeTy)
-      (pcallee : ExprProvenance ct hwfct callee)
-      (arg : EmbeddedExprBridge ct hwfct Γ argExpr argTy)
-      (parg : ExprProvenance ct hwfct arg)
-      (hselect : CallSelection ct calleeTy paramTy returnTy)
-      (hargSub : IsSubtype ct argTy paramTy)
-      (hcall :
-        callSourceTy?
-          (gct := embedClassTable ct)
-          (s := calleeSummarySrc (embedClassTable ct) callee.srcTy)
-          (argTy := arg.srcTy)
-          hwfct
-          (callableSummaryOk_calleeSummarySrc callee.srcSource callee.srcWellFormed)
-          arg.srcWellFormed
-        = some bridge.srcTy)
-      (hhsrc :
-        HEq bridge.hsrc
-          (GSrcInfer.call
-            callee.hsrc
-            arg.hsrc
-            callee.srcSource
-            callee.srcWellFormed
-            arg.srcWellFormed
-            hcall)) :
-      ExprProvenance ct hwfct bridge
-  | cond
-      {Γ : TyEnv}
-      {condExpr thenExpr elseExpr : Expr}
-      {testTy thenTy elseTy : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.cond condExpr thenExpr elseExpr) (.union thenTy elseTy))
-      (hnotIsInstance : (embedExpr condExpr).notIsInstance)
-      (condBridge : EmbeddedExprBridge ct hwfct Γ condExpr testTy)
-      (pcond : ExprProvenance ct hwfct condBridge)
-      (hbool :
-        AssignableTo (embedClassTable ct) condBridge.srcTy (.class_ boolClass))
-      (thenBridge : EmbeddedExprBridge ct hwfct Γ thenExpr thenTy)
-      (pthen : ExprProvenance ct hwfct thenBridge)
-      (elseBridge : EmbeddedExprBridge ct hwfct Γ elseExpr elseTy)
-      (pelse : ExprProvenance ct hwfct elseBridge)
-      (hhsrc :
-        HEq bridge.hsrc
-          (GSrcInfer.cond
-            hnotIsInstance
-            condBridge.hsrc
-            hbool
-            thenBridge.hsrc
-            elseBridge.hsrc)) :
-      ExprProvenance ct hwfct bridge
-  | isInstance
-      {Γ : TyEnv}
-      {x C : Identifier}
-      {T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.isInstance x C) T) :
-      ExprProvenance ct hwfct bridge
-  | condIsInstance
-      {Γ : TyEnv}
-      {x C : Identifier}
-      {T : Ty}
-      {thenExpr elseExpr : Expr}
-      {resultTy : Ty}
-      {cls : Class}
-      (bridge : EmbeddedExprBridge ct hwfct Γ (.cond (.isInstance x C) thenExpr elseExpr) resultTy)
-      (hlook : Γ.lookup x = some T)
-      (hfind : findClass ct C = some cls)
-      (thenBridge :
-        EmbeddedExprBridge
-          ct
-          hwfct
-          (Γ.update x (.intersection T (.class_ C)))
-          thenExpr
-          resultTy)
-      (pthen :
-        ExprProvenance
-          ct
-          hwfct
-          thenBridge)
-      (elseBridge :
-        EmbeddedExprBridge
-          ct
-          hwfct
-          (Γ.update x (.intersection T (.negClass C)))
-          elseExpr
-          resultTy)
-      (pelse :
-        ExprProvenance
-          ct
-          hwfct
-          elseBridge) :
-      ExprProvenance ct hwfct bridge
-  | sub
-      {Γ : TyEnv}
-      {e : Expr}
-      {S T : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ e T)
-      (child : EmbeddedExprBridge ct hwfct Γ e S)
-      (pchild : ExprProvenance ct hwfct child)
-      (hsub : IsSubtype ct S T)
-      (hhsrc : HEq bridge.hsrc child.hsrc) :
-      ExprProvenance ct hwfct bridge
-  | interIntro
-      {Γ : TyEnv}
-      {e : Expr}
-      {T U : Ty}
-      (bridge : EmbeddedExprBridge ct hwfct Γ e (.intersection T U))
-      (left : EmbeddedExprBridge ct hwfct Γ e T)
-      (pleft : ExprProvenance ct hwfct left)
-      (right : EmbeddedExprBridge ct hwfct Γ e U)
-      (pright : ExprProvenance ct hwfct right)
-      (hhsrcLeft : HEq bridge.hsrc left.hsrc)
-      (hhsrcRight : HEq bridge.hsrc right.hsrc) :
-      ExprProvenance ct hwfct bridge
+namespace EmbeddedExprBridgeCore
 
-structure ViewWitness
-    (ct : ClassTable)
-    (gct : GClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (T : Ty)
-    (v : CheckedValue) : Type where
-  srcTy : GTy
-  view : ViewOnSrc ct T srcTy
-  witness : CheckedValueWitness gct cct heap v srcTy
+/-- The directly derived static type is a subtype of the requested type. -/
+def output_subtype
+    {ct : ClassTable}
+    {hwfct : WellFormedGClassTableCore (embedClassTable ct)}
+    {Γ : TyEnv} {e : Expr} {producerTy : Ty} {srcTy : GTy}
+    {hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy}
+    {advertisedTy : Ty}
+    (core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy) :
+    IsSubtype hwfct.toOriginalWellFormedClassHierarchy producerTy advertisedTy :=
+  match core with
+  | .var _ output_subtype .. => output_subtype
+  | .constNone output_subtype .. => output_subtype
+  | .constTrue output_subtype .. => output_subtype
+  | .constFalse output_subtype .. => output_subtype
+  | .new _ _ _ _ _ output_subtype .. => output_subtype
+  | .attrAccess _ _ _ _ _ output_subtype .. => output_subtype
+  | .call _ _ _ _ _ _ _ _ output_subtype .. => output_subtype
+  | .cond _ _ _ _ _ _ _ _ _ output_subtype .. => output_subtype
+  | .isInstance _ _ _ output_subtype .. => output_subtype
+  | .condIsInstance _ _ _ _ _ _ _ output_subtype .. => output_subtype
+  | .interIntro _ _ _ _ output_subtype .. => output_subtype
+  | .sub _ _ output_subtype .. => output_subtype
 
-theorem checkedCallableView_heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (hview : CheckedCallableView gct cct heap v) :
-    CheckedCallableView gct cct heap' v := by
-  cases hview with
-  | objRefBoundMethod hlook hrecv hmro =>
-      exact .objRefBoundMethod (hmono _ _ hlook) (hmono _ _ hrecv) hmro
+/-- The expression's directly derived static type uses valid class names. -/
+def producer_wellFormed
+    {ct : ClassTable}
+    {hwfct : WellFormedGClassTableCore (embedClassTable ct)}
+    {Γ : TyEnv} {e : Expr} {producerTy : Ty} {srcTy : GTy}
+    {hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy}
+    {advertisedTy : Ty}
+    (core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy) :
+    WellFormedTy ct producerTy :=
+  (output_subtype core).sourceWellFormed
 
-theorem checkedAnyShape_heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (hshape : CheckedAnyShape gct cct heap v) :
-    CheckedAnyShape gct cct heap' v := by
-  cases hshape with
-  | objRef hlook =>
-      exact .objRef (hmono _ _ hlook)
+/-- Derive the static typing proof for the expression's directly derived type. -/
+def typing
+    {ct : ClassTable}
+    {hwfct : WellFormedGClassTableCore (embedClassTable ct)}
+    {Γ : TyEnv} {e : Expr} {producerTy : Ty} {srcTy : GTy}
+    {hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy}
+    {advertisedTy : Ty}
+    (core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy) :
+    HasType hwfct.toOriginalWellFormedClassHierarchy Γ e producerTy :=
+  match core with
+  | .var lookup .. => .var lookup
+  | .constNone .. => .constNone
+  | .constTrue .. => .constTrue
+  | .constFalse .. => .constFalse
+  | .new class_lookup _ notBool notNone notBoundMethod .. =>
+      .new class_lookup notBool notNone notBoundMethod
+  | .attrAccess _ receiver selection .. => by
+      cases selection with
+      | class_ method => exact .attrAccess (typing receiver) method
+      | union first second => exact .attrAccessUnion (typing receiver) first second
+      | inter first second =>
+          obtain ⟨_, _, _, firstLookup, firstMro, firstMethod⟩ := first
+          obtain ⟨_, _, _, secondLookup, secondMro, secondMethod⟩ := second
+          exact HasType.attrAccessInter
+            ((typing receiver).sub (.interLeft (.refl (WellFormedTy.class_of_lookup firstLookup))
+              (WellFormedTy.class_of_lookup secondLookup)))
+            ((typing receiver).sub (.interRight (.refl (WellFormedTy.class_of_lookup secondLookup))
+              (WellFormedTy.class_of_lookup firstLookup)))
+            ⟨_, _, _, firstLookup, firstMro, firstMethod⟩
+            ⟨_, _, _, secondLookup, secondMro, secondMethod⟩
+  | .call _ calleeBridge _ argumentBridge selection argument_subtype .. =>
+      .call ((typing calleeBridge).sub (callSelection_subtype_callable selection
+        (producer_wellFormed calleeBridge) argument_subtype.targetWellFormed))
+        (typing argumentBridge) argument_subtype
+  | .cond _ _ conditionBridge condition_bool_subtype _ _ thenBridge _ elseBridge .. =>
+      .cond (typing conditionBridge) condition_bool_subtype
+        (typing thenBridge) (typing elseBridge)
+  | .isInstance lookup class_lookup .. => .isInstance lookup class_lookup
+  | .condIsInstance lookup class_lookup _ _ thenBridge _ elseBridge .. =>
+      .condIsInstance lookup class_lookup (typing thenBridge) (typing elseBridge)
+  | .interIntro _ left _ right .. =>
+      .interIntro (typing left) (typing right)
+  | .sub _ inner .. =>
+      typing inner
 
-theorem checkedClassView_heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (hview : CheckedClassView gct cct heap v cname) :
-    CheckedClassView gct cct heap' v cname := by
-  cases hview with
-  | objRef hlook hfind hmro hmem =>
-      exact .objRef (hmono _ _ hlook) hfind hmro hmem
+/-- Connect the directly derived static type to the source type. -/
+def view
+    {ct : ClassTable}
+    {hwfct : WellFormedGClassTableCore (embedClassTable ct)}
+    {Γ : TyEnv} {e : Expr} {producerTy : Ty} {srcTy : GTy}
+    {hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy}
+    {advertisedTy : Ty}
+    (core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy) :
+    CoreViewOnSrc ct producerTy srcTy :=
+  match core with
+  | .var .. => .embed
+  | .constNone .. => .embed
+  | .constTrue .. => .embed
+  | .constFalse .. => .embed
+  | .new .. => .embed
+  | .attrAccess _ _ _ _ result_view .. => result_view
+  | .call _ _ _ _ _ _ _ return_view .. => return_view
+  | .cond _ _ _ _ _ _ thenBridge _ elseBridge .. =>
+      .union (view thenBridge) (view elseBridge)
+  | .isInstance .. => .embed
+  | .condIsInstance _ _ _ _ thenBridge _ elseBridge .. =>
+      .union (view thenBridge) (view elseBridge)
+  | .interIntro _ left _ right .. =>
+      .interIntro (view left) (view right)
+  | .sub _ inner .. => view inner
 
-theorem checkedValueWitness_heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (w : CheckedValueWitness gct cct heap v G) :
-    CheckedValueWitness gct cct heap' v G :=
-  match w with
-  | .mk hwf (.any hshape) => .mk hwf (.any (checkedAnyShape_heapMono hmono hshape))
-  | .mk hwf (.class_ hview) => .mk hwf (.class_ (checkedClassView_heapMono hmono hview))
-  | .mk hwf (.callable hview) => .mk hwf (.callable (checkedCallableView_heapMono hmono hview))
-  | .mk hwf (.unionLeft wG) => .mk hwf (.unionLeft (checkedValueWitness_heapMono hmono wG))
-  | .mk hwf (.unionRight wH) => .mk hwf (.unionRight (checkedValueWitness_heapMono hmono wH))
-  | .mk hwf (.intersection wG wH) =>
-      .mk hwf (.intersection (checkedValueWitness_heapMono hmono wG)
-        (checkedValueWitness_heapMono hmono wH))
-  | .mk hwf (.negClass hshape hok) =>
-      .mk hwf (.negClass (checkedAnyShape_heapMono hmono hshape)
-        (fun ℓ => enforceValue_heapMono hmono (hok ℓ)))
+/-- The requested static type uses valid class names. -/
+def output_wellFormed
+    {ct : ClassTable}
+    {hwfct : WellFormedGClassTableCore (embedClassTable ct)}
+    {Γ : TyEnv} {e : Expr} {producerTy : Ty} {srcTy : GTy}
+    {hsrc : GSrcInfer (embedClassTable ct) hwfct (embedTyEnv Γ) (embedExpr e) srcTy}
+    {advertisedTy : Ty}
+    (core : EmbeddedExprBridgeCore ct hwfct Γ e producerTy srcTy hsrc advertisedTy) :
+    WellFormedTy ct advertisedTy :=
+  (output_subtype core).targetWellFormed
 
-def viewWitness_heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (w : ViewWitness ct gct cct heap T v) :
-    ViewWitness ct gct cct heap' T v where
-  srcTy := w.srcTy
-  view := w.view
-  witness := checkedValueWitness_heapMono hmono w.witness
+end EmbeddedExprBridgeCore
 
-theorem checkedValueWitness_class_inv
-    (w : CheckedValueWitness gct cct heap v (embedTy (.class_ cname))) :
-    CheckedClassView gct cct heap v cname := by
-  simpa using checkedValueWitness_class_view w
+namespace EmbeddedExprBridge
 
-theorem checkedValueWitness_callable_inv
-    (w : CheckedValueWitness gct cct heap v (embedTy (.callable P R))) :
-    CheckedCallableView gct cct heap v := by
-  simpa using checkedValueWitness_callable_view w
+/-- Derive the static typing proof for the expression's directly derived type. -/
+def typing
+    (bridge : EmbeddedExprBridge ct hwfct Γ e T) :
+    HasType hwfct.toOriginalWellFormedClassHierarchy Γ e bridge.producerTy :=
+  bridge.core.typing
 
-theorem checkedValueWitness_objRef_inv
-    (w : CheckedValueWitness gct cct heap v G)
-    (hv : v = .objRef oid) :
-    ∃ obj, heap.lookup oid = some obj :=
-  checkedValueWitness_objRef_lookup w hv
+/-- The expression's directly derived static type uses valid class names. -/
+def producer_wellFormed
+    (bridge : EmbeddedExprBridge ct hwfct Γ e T) :
+    WellFormedTy ct bridge.producerTy :=
+  bridge.core.producer_wellFormed
 
-theorem checkedCallableView_payload
-    (hview : CheckedCallableView gct cct heap (.objRef oid)) :
-    ∃ recvOid recvObj cm,
-      heap.lookup oid = some ⟨boundMethodClass, .boundMethod recvOid cm⟩ ∧
-      heap.lookup recvOid = some recvObj ∧
-      CheckedMethodInReceiverMro gct cct recvObj.className cm := by
-  cases hview with
-  | objRefBoundMethod hlook hrecv hmro =>
-      exact ⟨_, _, _, hlook, hrecv, hmro⟩
+/-- Connect the directly derived static type to the source type. -/
+def view
+    (bridge : EmbeddedExprBridge ct hwfct Γ e T) :
+    CoreViewOnSrc ct bridge.producerTy bridge.srcTy :=
+  bridge.core.view
 
-theorem checkedValueWitness_callable_payload
-    (w : CheckedValueWitness gct cct heap (.objRef oid) (.callable P R)) :
-    ∃ recvOid recvObj cm,
-      heap.lookup oid = some ⟨boundMethodClass, .boundMethod recvOid cm⟩ ∧
-      heap.lookup recvOid = some recvObj ∧
-      CheckedMethodInReceiverMro gct cct recvObj.className cm :=
-  checkedCallableView_payload (checkedValueWitness_callable_view w)
+/-- The directly derived static type is a subtype of the requested type. -/
+def output_subtype
+    (bridge : EmbeddedExprBridge ct hwfct Γ e T) :
+    IsSubtype hwfct.toOriginalWellFormedClassHierarchy bridge.producerTy T :=
+  bridge.core.output_subtype
 
-theorem checkedValueWitness_approxFormula
-    (w : CheckedValueWitness gct cct heap v G) :
-    CheckedValueWitness gct cct heap v (approxFormula G) :=
-  match w with
-  | .mk hwf (.any hshape) =>
-      .mk (approxFormula_wellFormed hwf) (.any hshape)
-  | .mk hwf (.class_ hview) =>
-      .mk (approxFormula_wellFormed hwf) (.class_ hview)
-  | .mk hwf (.callable hview) =>
-      .mk (approxFormula_wellFormed hwf) (.any (checkedCallableView_toShape hview))
-  | .mk hwf (.unionLeft wG) =>
-      .mk (approxFormula_wellFormed hwf)
-        (.unionLeft (checkedValueWitness_approxFormula wG))
-  | .mk hwf (.unionRight wH) =>
-      .mk (approxFormula_wellFormed hwf)
-        (.unionRight (checkedValueWitness_approxFormula wH))
-  | .mk hwf (.intersection wG wH) =>
-      .mk (approxFormula_wellFormed hwf)
-        (.intersection
-          (checkedValueWitness_approxFormula wG)
-          (checkedValueWitness_approxFormula wH))
-  | .mk hwf (.negClass hshape hok) =>
-      .mk (approxFormula_wellFormed hwf) (.negClass hshape hok)
+/-- The requested static type uses valid class names. -/
+def output_wellFormed
+    (bridge : EmbeddedExprBridge ct hwfct Γ e T) :
+    WellFormedTy ct T :=
+  bridge.core.output_wellFormed
 
-theorem checkedValueWitness_approxTarget
-    (w : CheckedValueWitness gct cct heap v G) :
-    CheckedValueWitness gct cct heap v (approxTarget gct G) :=
-  match w with
-  | .mk hwf (.any hshape) =>
-      .mk (approxTarget_wellFormed hwf) (.any hshape)
-  | .mk hwf (.class_ hview) =>
-      .mk (approxTarget_wellFormed hwf) (.class_ hview)
-  | .mk hwf (.callable hview) =>
-      .mk (approxTarget_wellFormed hwf) (.callable hview)
-  | .mk hwf (.unionLeft wG) =>
-      .mk (approxTarget_wellFormed hwf)
-        (.unionLeft (checkedValueWitness_approxTarget wG))
-  | .mk hwf (.unionRight wH) =>
-      .mk (approxTarget_wellFormed hwf)
-        (.unionRight (checkedValueWitness_approxTarget wH))
-  | .mk hwf (.intersection wG wH) =>
-      by
-        simpa [approxTarget] using
-          checkedValueWitness_approxFormula
-            (gct := gct)
-            (cct := cct)
-            (heap := heap)
-            (v := v)
-            (.mk hwf (.intersection wG wH))
-  | .mk hwf (.negClass hshape hok) =>
-      .mk (approxTarget_wellFormed hwf) (.negClass hshape hok)
+end EmbeddedExprBridge
 
-theorem runtime_receiver_extends_static_class
-    (wRecv : CheckedValueWitness
-      (embedClassTable ct)
-      cct
-      heap
-      (.objRef oid)
-      (embedTy (.class_ cname))) :
-    ∃ recvObj recvCls recvMro,
-      heap.lookup oid = some recvObj ∧
-      findClass ct recvObj.className = some recvCls ∧
-      ComputeMro ct recvCls recvMro ∧
-      IsSubtype ct (.class_ recvObj.className) (.class_ cname) := by
-  cases checkedValueWitness_class_inv wRecv with
-  | objRef hlook hfind hmro hmem =>
-      obtain ⟨recvCls, hfindRecv, hclsEq⟩ := findClass_embedClassTable_reverse hfind
-      subst hclsEq
-      exact ⟨_, recvCls, _,
-        hlook,
-        hfindRecv,
-        computeMro_embedClassTable_reverse hfindRecv hmro,
-        .class_ hfindRecv (computeMro_embedClassTable_reverse hfindRecv hmro) hmem⟩
-
-theorem typed_method_exists_on_runtime_receiver_embed
-    (halign : Checked.AlignedCheckedClassTable (embedClassTable ct) cct)
-    {cname attrName : Identifier}
-    {paramTy returnTy : Ty}
-    (hfmt : FindMethodType ct cname attrName paramTy returnTy)
-    {recvClass : Identifier} {recvCls : Class} {recvMro : List Identifier}
-    (hsub : IsSubtype ct (.class_ recvClass) (.class_ cname))
-    (hfindRecv : findClass ct recvClass = some recvCls)
-    (hmroRecv : ComputeMro ct recvCls recvMro) :
-    ∃ cm, findCheckedMethodInMro cct recvMro attrName = some cm := by
-  obtain ⟨m, hlookupRecv⟩ :=
-    typed_method_exists_on_runtime_receiver hfmt hsub hfindRecv hmroRecv
-  have hname : m.name = attrName :=
-    findMethodInMro_name hlookupRecv
-  have hfindRecvG :
-      findGClass (embedClassTable ct) recvClass = some (embedClass recvCls) :=
-    findGClass_embedClassTable hfindRecv
-  have hmroRecvG :
-      GComputeMro (embedClassTable ct) (embedClass recvCls) recvMro :=
-    computeGMro_embedClassTable hmroRecv
-  have hlookupRecvG :
-      findGMethodInMro (embedClassTable ct) recvMro (embedMethod m).name = some (embedMethod m) := by
-    simpa [embedMethod, hname] using
-      (findGMethodInMro_embed hlookupRecv)
-  obtain ⟨cc, hfindCc, _, _⟩ :=
-    halign.classLookupAgree recvClass (embedClass recvCls) hfindRecvG
-  obtain ⟨cm, hfindCm, _, _, _, _⟩ :=
-    halign.methodLookupAgree
-      recvClass
-      (embedClass recvCls)
-      cc
-      recvMro
-      (embedMethod m)
-      hfindRecvG
-      hfindCc
-      hmroRecvG
-      hlookupRecvG
-  exact ⟨cm, by simpa [embedMethod, hname] using hfindCm⟩
-
-theorem typed_method_variance_on_runtime_receiver_embed
-    (hliskov : LiskovCondition ct)
-    {cname attrName : Identifier}
-    {paramTy returnTy : Ty}
-    (hfmt : FindMethodType ct cname attrName paramTy returnTy)
-    {recvClass : Identifier} {recvCls : Class} {recvMro : List Identifier}
-    (hsub : IsSubtype ct (.class_ recvClass) (.class_ cname))
-    (hfindRecv : findClass ct recvClass = some recvCls)
-    (hmroRecv : ComputeMro ct recvCls recvMro)
-    {m : Method}
-    (hlookupRecv : findMethodInMro ct recvMro attrName = some m) :
-    AssignableTo (embedClassTable ct)
-      (embedTy paramTy)
-      (embedTy m.paramTy) ∧
-    AssignableTo (embedClassTable ct)
-      (embedTy m.returnTy)
-      (embedTy returnTy) := by
-  obtain ⟨hparam, hreturn⟩ :=
-    typed_method_variance_on_runtime_receiver
-      hliskov
-      hfmt
-      hsub
-      hfindRecv
-      hmroRecv
-      hlookupRecv
-  exact
-    ⟨staticSubtype_to_embeddedAssignableTo hparam,
-      staticSubtype_to_embeddedAssignableTo hreturn⟩
-
-theorem attrSelection_runtime_lookup_embed
-    (halign : Checked.AlignedCheckedClassTable (embedClassTable ct) cct)
-    (hselect : AttrSelection ct recvTy attrName resultTy)
-    (wRecv : CheckedValueWitness
-      (embedClassTable ct)
-      cct
-      heap
-      (.objRef oid)
-      (embedTy recvTy)) :
-    ∃ cm recvObj recvCls recvMro,
-      heap.lookup oid = some recvObj ∧
-      findClass ct recvObj.className = some recvCls ∧
-      ComputeMro ct recvCls recvMro ∧
-      findCheckedMethodInMro cct recvMro attrName = some cm := by
-  have lookup :
-      ∀ {cname : Identifier} {pT rT : Ty},
-        FindMethodType ct cname attrName pT rT →
-        CheckedValueWitness (embedClassTable ct) cct heap (.objRef oid)
-          (embedTy (.class_ cname)) →
-        ∃ cm recvObj recvCls recvMro,
-          heap.lookup oid = some recvObj ∧
-          findClass ct recvObj.className = some recvCls ∧
-          ComputeMro ct recvCls recvMro ∧
-          findCheckedMethodInMro cct recvMro attrName = some cm := by
-    intro _ _ _ hfmt w
-    rcases runtime_receiver_extends_static_class w with
-      ⟨recvObj, recvCls, recvMro, hlook, hfindRecv, hmroRecv, hsub⟩
-    obtain ⟨cm, hlookupCm⟩ :=
-      typed_method_exists_on_runtime_receiver_embed halign hfmt hsub hfindRecv hmroRecv
-    exact ⟨cm, recvObj, recvCls, recvMro, hlook, hfindRecv, hmroRecv, hlookupCm⟩
-  cases hselect with
-  | class_ hfmt => exact lookup hfmt wRecv
-  | union hfmt1 hfmt2 =>
-      cases wRecv with
-      | mk _ data =>
-          cases data with
-          | unionLeft wLeft => exact lookup hfmt1 wLeft
-          | unionRight wRight => exact lookup hfmt2 wRight
-  | inter hfmt1 _ =>
-      cases wRecv with
-      | mk _ data =>
-          cases data with
-          | intersection wLeft _ => exact lookup hfmt1 wLeft
-
-structure EmbeddedStaticElaboration (p : Program) : Type where
-  mainTy : Ty
-  mainTyping : HasType p.classes [] p.main mainTy
-  core : WellFormedGClassTableCore (embedClassTable p.classes)
-  mainBridge : EmbeddedExprBridge p.classes core [] p.main mainTy
-  mainProvenance : ExprProvenance p.classes core mainBridge
-  methodBodiesBridge : ∀ cname c m,
-    findClass p.classes cname = some c →
-    m ∈ c.methods →
-    EmbeddedExprBridge p.classes core
-      [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
-      m.body
-      m.returnTy
-  methodBodiesProvenance : ∀ cname c m
-    (hfind : findClass p.classes cname = some c)
-    (hm : m ∈ c.methods),
-    ExprProvenance p.classes core (methodBodiesBridge cname c m hfind hm)
-  mainTarget : GTy
-  mainTarget_eq :
-    mainTarget = approxTarget (embedClassTable p.classes) mainBridge.srcTy
-  cp : CheckedProgram
-  compiled : Checked.ElaboratesProgramAt (embedProgram p) mainTarget cp
-  main_eq : cp.main = (compileCheck .main mainBridge.hsrc [] mainTarget 0).1
-
-/-- A static program together with the explicit gradual source bridges needed
-    to compile it through the existing checked pipeline. This is the current
-    weakest useful replacement for the too-strong theorem that every arbitrary
-    `HasType` derivation embeds into principal gradual source typing. -/
+/-- A static program together with the explicit gradual source bridges consumed
+by the checked compiler. -/
 structure BridgeableStaticProgram (p : Program) : Type where
-  static : EmbeddableStaticProgram p
+  /-- The static class table and its permitted method boundary types. -/
+  classTable : EmbeddableStaticClassTable p.classes
+  /-- The static result type requested for the main expression. -/
+  mainTy : Ty
+  /-- The typing and inheritance data for the translated class table. -/
   core : WellFormedGClassTableCore (embedClassTable p.classes)
-  mainBridge : EmbeddedExprBridge p.classes core [] p.main static.mainTy
-  mainProvenance : ExprProvenance p.classes core mainBridge
+  /-- The embedded gradual source bridge for the program main expression. -/
+  mainBridge : EmbeddedExprBridge p.classes core [] p.main mainTy
+  /-- Embedded gradual source bridges for method bodies. -/
   methodBodiesBridge : ∀ cname c m,
     findClass p.classes cname = some c →
     m ∈ c.methods →
@@ -921,12 +872,11 @@ structure BridgeableStaticProgram (p : Program) : Type where
       [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
       m.body
       m.returnTy
-  methodBodiesProvenance : ∀ cname c m
-    (hfind : findClass p.classes cname = some c)
-    (hm : m ∈ c.methods),
-    ExprProvenance p.classes core (methodBodiesBridge cname c m hfind hm)
 
-private def compileEmbeddedMethod
+/-- Compile one embedded static method into the checked method record. The
+source inference determines the checked body; the method signature determines
+the checked parameter and return obligations. -/
+def compileEmbeddedMethod
     (p : Program)
     (core : WellFormedGClassTableCore (embedClassTable p.classes))
     (cname : Identifier)
@@ -944,95 +894,64 @@ private def compileEmbeddedMethod
   param := m.param
   paramTy := checkedTargetOfGTy (embedTy m.paramTy)
   returnTy := checkedTargetOfGTy (embedTy m.returnTy)
-  parameterLabels :=
-    castBoundaryLabels
-      (by
-        have h :=
-          (compileBoundaryTarget_eq_compileBoundaryRaw_interp
-            (checkedTargetOfGTy (embedTy m.paramTy))).symm
-        simp only [interpTarget_checkedTargetOfGTy] at h
-        exact h)
-      ((mkBoundaryLabels
-        (.methodParameter cname m.name)
-        .negative
-        (compileBoundaryRaw (embedTy m.paramTy))
-        0).1)
-  returnLabels :=
-    castBoundaryLabels
-      (by
-        have h :=
-          (compileBoundaryTarget_eq_compileBoundaryRaw_interp
-            (checkedTargetOfGTy (embedTy m.returnTy))).symm
-        simp only [interpTarget_checkedTargetOfGTy] at h
-        exact h)
-      ((mkBoundaryLabels
-        (.methodReturn cname m.name)
-        .positive
-        (compileBoundaryRaw (embedTy m.returnTy))
-        0).1)
+  parameterObligation :=
+    .hasType (.methodParameter cname m.name) (embedTy m.paramTy)
+  returnObligation :=
+    .hasType (.methodReturn cname m.name) (embedTy m.returnTy)
   body :=
-    (compileCheck
-      (.methodBody cname m.name)
+    compileCheck
       hsrc
       [(m.param, embedTy m.paramTy),
        (m.receiverParam, .class_ cname)]
-      (embedTy m.returnTy)
-      0).1
+      .any
+      (.methodBody cname m.name [])
 
-private theorem compileEmbeddedMethod_compiled
-    (hprog : BridgeableStaticProgram p)
+/-- The checked method emitted by `compileEmbeddedMethod` satisfies the checked
+class-table compiler relation for the corresponding embedded source method. -/
+def compileEmbeddedMethod_compiled
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
     (hfind : findClass p.classes cname = some c)
     (hm : m ∈ c.methods) :
     Checked.IsCompiledMethodAt
       (embedClassTable p.classes)
+      core
       cname
       (embedMethod m)
-      (compileEmbeddedMethod p hprog.core cname m
-        (hprog.methodBodiesBridge cname c m hfind hm).hsrc) where
+      (compileEmbeddedMethod p core cname m
+        (methodBodiesBridge cname c m hfind hm).hsrc) where
   name_eq := rfl
   receiverParam_eq := rfl
   param_eq := rfl
-  paramTy_eq := by
+  paramTy_eq := by simp [compileEmbeddedMethod, embedMethod]
+  returnTy_eq := by simp [compileEmbeddedMethod, embedMethod]
+  parameterObligation_eq := rfl
+  returnObligation_eq := rfl
+  body_srcTy := (methodBodiesBridge cname c m hfind hm).srcTy
+  body_hsrc := (methodBodiesBridge cname c m hfind hm).hsrc
+  body_eq := by
     simp [compileEmbeddedMethod, embedMethod]
-  returnTy_eq := by
-    simp [compileEmbeddedMethod, embedMethod]
-  paramContract_eq := by
-    change
-      compileBoundaryTarget (checkedTargetOfGTy (embedTy m.paramTy)) =
-        compileBoundaryRaw (interpTarget (checkedTargetOfGTy (embedTy m.paramTy)))
-    exact compileBoundaryTarget_eq_compileBoundaryRaw_interp
-      (checkedTargetOfGTy (embedTy m.paramTy))
-  returnContract_eq := by
-    change
-      compileBoundaryTarget (checkedTargetOfGTy (embedTy m.returnTy)) =
-        compileBoundaryRaw (interpTarget (checkedTargetOfGTy (embedTy m.returnTy)))
-    exact compileBoundaryTarget_eq_compileBoundaryRaw_interp
-      (checkedTargetOfGTy (embedTy m.returnTy))
-  parameterLabels_eq := by
-    simp [compileEmbeddedMethod, castBoundaryLabels]
-  returnLabels_eq := by
-    simp [compileEmbeddedMethod, castBoundaryLabels]
-  body_compiled := by
-    refine ⟨hprog.core, _, (hprog.methodBodiesBridge cname c m hfind hm).hsrc, ?_⟩
-    change
-      (compileCheck
-        (.methodBody cname m.name)
-        (hprog.methodBodiesBridge cname c m hfind hm).hsrc
-        [(m.param, embedTy m.paramTy),
-         (m.receiverParam, .class_ cname)]
-        (embedTy m.returnTy)
-        0).1 =
-      (compileCheck
-        (.methodBody cname m.name)
-        (hprog.methodBodiesBridge cname c m hfind hm).hsrc
-        [(m.param, embedTy m.paramTy),
-         (m.receiverParam, .class_ cname)]
-        (embedTy m.returnTy)
-        0).1
     rfl
 
-private def compileEmbeddedMethods
-    (hprog : BridgeableStaticProgram p)
+/-- Compile a list of source methods from one embedded static class. The
+membership argument supplies each method's bridge from the enclosing class. -/
+def compileEmbeddedMethods
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
     (c : Class)
     (hfind : findClass p.classes c.name = some c) :
     (ms : List Method) →
@@ -1040,39 +959,59 @@ private def compileEmbeddedMethods
     List CheckedMethod
   | [], _ => []
   | m :: ms, hmems =>
-      compileEmbeddedMethod p hprog.core c.name m
-        (hprog.methodBodiesBridge c.name c m hfind (hmems (.head _))).hsrc ::
-      compileEmbeddedMethods hprog c hfind ms
+      compileEmbeddedMethod p core c.name m
+        (methodBodiesBridge c.name c m hfind (hmems (.head _))).hsrc ::
+      compileEmbeddedMethods p core methodBodiesBridge c hfind ms
         (fun hm => hmems (.tail _ hm))
 
-private theorem compileEmbeddedMethods_compiled
-    (hprog : BridgeableStaticProgram p)
+/-- The list produced by `compileEmbeddedMethods` is pointwise related to the
+embedded source methods by checked method compilation. -/
+def compileEmbeddedMethods_compiled
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
     (c : Class)
     (hfind : findClass p.classes c.name = some c) :
     ∀ (ms : List Method)
       (hmems : ∀ {m : Method}, m ∈ ms → m ∈ c.methods),
-      Forall₂
-        (Checked.IsCompiledMethodAt (embedClassTable p.classes) c.name)
+      Forall2Data
+        (Checked.IsCompiledMethodAt (embedClassTable p.classes) core c.name)
         (ms.map embedMethod)
-        (compileEmbeddedMethods hprog c hfind ms hmems)
+        (compileEmbeddedMethods p core methodBodiesBridge c hfind ms hmems)
   | [], _ => .nil
   | m :: ms, hmems =>
       .cons
-        (by
-          simpa using
-            compileEmbeddedMethod_compiled
-              (p := p)
-              (hprog := hprog)
-              (cname := c.name)
-              (c := c)
-              (m := m)
-              hfind
-              (hmems (.head _)))
-        (compileEmbeddedMethods_compiled hprog c hfind ms
+        (compileEmbeddedMethod_compiled
+          (p := p)
+          (core := core)
+          (methodBodiesBridge := methodBodiesBridge)
+          (cname := c.name)
+          (c := c)
+          (m := m)
+          hfind
+          (hmems (.head _)))
+        (compileEmbeddedMethods_compiled p core methodBodiesBridge c hfind ms
           (fun hm => hmems (.tail _ hm)))
 
-private def compileEmbeddedClass
-    (hprog : BridgeableStaticProgram p)
+/-- Compile one embedded static class by preserving its hierarchy fields and
+compiling each method body through the supplied source bridge. -/
+def compileEmbeddedClass
+    (p : Program)
+    (staticClassTable : EmbeddableStaticClassTable p.classes)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
     (c : Class)
     (hmem : c ∈ p.classes) :
     CheckedClass where
@@ -1080,670 +1019,538 @@ private def compileEmbeddedClass
   baseClasses := c.baseClasses
   methods :=
     compileEmbeddedMethods
-      hprog
+      p
+      core
+      methodBodiesBridge
       c
-      (findClass_of_mem hprog.static.classTable.hwf.classNamesUnique hmem)
+      (findClass_of_mem staticClassTable.hwf.classNamesUnique hmem)
       c.methods
       (fun hm => hm)
 
-private theorem compileEmbeddedClass_compiled
-    (hprog : BridgeableStaticProgram p)
+/-- The class produced by `compileEmbeddedClass` satisfies the checked
+class-table compiler relation for the embedded source class. -/
+def compileEmbeddedClass_compiled
+    (p : Program)
+    (staticClassTable : EmbeddableStaticClassTable p.classes)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
     (c : Class)
     (hmem : c ∈ p.classes) :
     Checked.IsCompiledClass
       (embedClassTable p.classes)
+      core
       (embedClass c)
-      (compileEmbeddedClass hprog c hmem) where
+      (compileEmbeddedClass p staticClassTable core methodBodiesBridge c hmem) where
   name_eq := rfl
   baseClasses_eq := rfl
   methods_compiled := by
     simpa [compileEmbeddedClass] using
       compileEmbeddedMethods_compiled
         (p := p)
-        hprog
+        (core := core)
+        (methodBodiesBridge := methodBodiesBridge)
         c
-        (findClass_of_mem hprog.static.classTable.hwf.classNamesUnique hmem)
+        (findClass_of_mem staticClassTable.hwf.classNamesUnique hmem)
         c.methods
         (fun hm => hm)
 
-private def compileEmbeddedClasses
-    (hprog : BridgeableStaticProgram p) :
+/-- Compile a class table by compiling each embedded static class in order. -/
+def compileEmbeddedClasses
+    (p : Program)
+    (staticClassTable : EmbeddableStaticClassTable p.classes)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy) :
     (cs : List Class) →
     (∀ {c : Class}, c ∈ cs → c ∈ p.classes) →
     CheckedClassTable
   | [], _ => []
   | c :: cs, hmems =>
-      compileEmbeddedClass hprog c (hmems (.head _)) ::
-      compileEmbeddedClasses hprog cs
+      compileEmbeddedClass p staticClassTable core methodBodiesBridge c (hmems (.head _)) ::
+      compileEmbeddedClasses p staticClassTable core methodBodiesBridge cs
         (fun hc => hmems (.tail _ hc))
 
-private theorem compileEmbeddedClasses_compiled
-    (hprog : BridgeableStaticProgram p) :
+/-- The class table produced by `compileEmbeddedClasses` is pointwise related
+to the embedded source class table by checked class compilation. -/
+def compileEmbeddedClasses_compiled
+    (p : Program)
+    (staticClassTable : EmbeddableStaticClassTable p.classes)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy) :
     ∀ (cs : List Class)
       (hmems : ∀ {c : Class}, c ∈ cs → c ∈ p.classes),
-      Forall₂
-        (Checked.IsCompiledClass (embedClassTable p.classes))
+      Forall2Data
+        (Checked.IsCompiledClass (embedClassTable p.classes) core)
         (cs.map embedClass)
-        (compileEmbeddedClasses hprog cs hmems)
+        (compileEmbeddedClasses p staticClassTable core methodBodiesBridge cs hmems)
   | [], _ => .nil
   | c :: cs, hmems =>
       .cons
         (compileEmbeddedClass_compiled
           (p := p)
-          hprog
+          (staticClassTable := staticClassTable)
+          (core := core)
+          (methodBodiesBridge := methodBodiesBridge)
           c
           (hmems (.head _)))
-        (compileEmbeddedClasses_compiled hprog cs
+        (compileEmbeddedClasses_compiled p staticClassTable core methodBodiesBridge cs
           (fun hc => hmems (.tail _ hc)))
 
-private def compileEmbeddedProgram
+/-- Compile an embedded static program into a checked program. Classes use the
+method bridges in the elaboration package, and the main expression is compiled
+at the approximation of its inferred embedded source type. -/
+def compileEmbeddedProgram
     (hprog : BridgeableStaticProgram p) :
     CheckedProgram where
-  classes := compileEmbeddedClasses hprog p.classes (fun hc => hc)
+  classes :=
+    compileEmbeddedClasses
+      p
+      hprog.classTable
+      hprog.core
+      hprog.methodBodiesBridge
+      p.classes
+      (fun hc => hc)
   main :=
-    (compileCheck
-      .main
+    compileCheck
       hprog.mainBridge.hsrc
       []
-      (approxTarget (embedClassTable p.classes) hprog.mainBridge.srcTy)
-      0).1
+      (approxTarget hprog.mainBridge.srcTy)
+      (.main [])
+
+/-- Source-side defining-class data for one successful MRO method lookup. -/
+structure SourceMethodLookupData
+    (ct : ClassTable)
+    (recvMro : List Identifier)
+    (attrName : Identifier)
+    (sourceMethod : Method)
+    (definingClassName : Identifier) : Type where
+  /-- The defining class is an entry in the runtime receiver MRO. -/
+  definingClass_mem : definingClassName ∈ recvMro
+  /-- The source class that contributes the method. -/
+  sourceClass : Class
+  /-- Source class lookup for the defining class. -/
+  findClass_source :
+    findClass ct definingClassName = some sourceClass
+  /-- Source method membership in the defining class. -/
+  method_mem_source :
+    sourceMethod ∈ sourceClass.methods
+  /-- The defining class member lookup returns the same method. -/
+  method_found_source :
+    findMethodInList sourceClass.methods attrName = some sourceMethod
+
+private def sourceMethodLookupData_canonical
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (cct : CheckedClassTable)
+    (classesCompiled :
+      Checked.IsCompiledClassTable
+        (embedClassTable p.classes) core cct)
+    {recvMro : List Identifier}
+    {attrName : Identifier}
+    {sourceMethod : Method}
+    (source_lookup :
+      findMethodInMro p.classes recvMro attrName = some sourceMethod) :
+    SourceMethodLookupData
+      p.classes recvMro attrName sourceMethod
+      (Checked.isCompiledClassTable_findMethodInMro
+        classesCompiled
+        (findGMethodInMro_embed source_lookup)).definingClassName :=
+  match recvMro with
+  | [] => by
+      simp [findMethodInMro, findMemberInHierarchy] at source_lookup
+  | cname :: rest => by
+      cases hfind : findClass p.classes cname with
+      | none =>
+          have hfindG :
+              findGClass (embedClassTable p.classes) cname = none := by
+            simp [findGClass_embedClassTable_eq, hfind]
+          have rest_lookup :
+              findMethodInMro p.classes rest attrName = some sourceMethod := by
+            simpa [findMethodInMro, findMemberInHierarchy, hfind] using source_lookup
+          let restData :=
+            sourceMethodLookupData_canonical
+              p core cct classesCompiled rest_lookup
+          simp only [Checked.isCompiledClassTable_findMethodInMro,
+            findMemberInHierarchy_transportData]
+          split
+          ·
+            exact
+              SourceMethodLookupData.mk
+                (List.Mem.tail cname restData.definingClass_mem)
+                restData.sourceClass
+                restData.findClass_source
+                restData.method_mem_source
+                restData.method_found_source
+          · rename_i hfindG'
+            rw [hfindG] at hfindG'
+            cases hfindG'
+      | some cls =>
+          have hfindG :
+              findGClass (embedClassTable p.classes) cname = some (embedClass cls) :=
+            findGClass_embedClassTable hfind
+          cases hmethod : findMethodInList cls.methods attrName with
+          | none =>
+              have hmethodG :
+                  findGMethodInList (cls.methods.map embedMethod) attrName = none := by
+                simp [findGMethodInList_embedMethods_eq, hmethod]
+              have rest_lookup :
+                  findMethodInMro p.classes rest attrName = some sourceMethod := by
+                simpa [findMethodInMro, findMemberInHierarchy, hfind, hmethod] using source_lookup
+              let restData :=
+                sourceMethodLookupData_canonical
+                  p core cct classesCompiled rest_lookup
+              simp only [Checked.isCompiledClassTable_findMethodInMro,
+                findMemberInHierarchy_transportData]
+              split
+              · rename_i hfindG'
+                rw [hfindG] at hfindG'
+                cases hfindG'
+              · rename_i gc hfindG'
+                have hgc : gc = embedClass cls := by
+                  exact Option.some.inj (hfindG'.symm.trans hfindG)
+                cases hgc
+                split
+                ·
+                  exact
+                    SourceMethodLookupData.mk
+                      (List.Mem.tail cname restData.definingClass_mem)
+                      restData.sourceClass
+                      restData.findClass_source
+                      restData.method_mem_source
+                      restData.method_found_source
+                · rename_i foundGMethod hmethodG'
+                  have hmethodG'' :
+                      findGMethodInList (cls.methods.map embedMethod) attrName =
+                        some foundGMethod := by
+                    simpa [findGMethodInList, embedClass] using hmethodG'
+                  rw [hmethodG] at hmethodG''
+                  cases hmethodG''
+          | some foundMethod =>
+              have hfound : foundMethod = sourceMethod := by
+                simpa [findMethodInMro, findMemberInHierarchy, hfind, hmethod] using source_lookup
+              cases hfound
+              have hmethodG :
+                  findGMethodInList (cls.methods.map embedMethod) attrName =
+                    some (embedMethod sourceMethod) := by
+                simp [findGMethodInList_embedMethods_eq, hmethod]
+              simp only [Checked.isCompiledClassTable_findMethodInMro,
+                findMemberInHierarchy_transportData]
+              split
+              · rename_i hfindG'
+                rw [hfindG] at hfindG'
+                cases hfindG'
+              · rename_i gc hfindG'
+                have hgc : gc = embedClass cls := by
+                  exact Option.some.inj (hfindG'.symm.trans hfindG)
+                cases hgc
+                split
+                · rename_i hmethodG'
+                  have hmethodG'' :
+                      findGMethodInList (cls.methods.map embedMethod) attrName = none := by
+                    simpa [findGMethodInList, embedClass] using hmethodG'
+                  rw [hmethodG] at hmethodG''
+                  cases hmethodG''
+                ·
+                  exact
+                    SourceMethodLookupData.mk
+                      (List.Mem.head rest)
+                      cls
+                      hfind
+                      (findByName_mem hmethod)
+                      hmethod
+
+/-- Source lookup data transported through the canonical compiled method lookup
+used by `embedded_static_program_elaborates`. -/
+private def sourceMethodLookupData_at_compiledLookup
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (cct : CheckedClassTable)
+    (classesCompiled :
+      Checked.IsCompiledClassTable
+        (embedClassTable p.classes) core cct)
+    (source_lookup :
+      findMethodInMro p.classes recvMro attrName = some sourceMethod)
+    (lookup :
+      RelatedHierarchyLookupData
+        findCheckedClass CheckedClass.methods CheckedMethod.name
+        cct recvMro attrName
+        (fun definingClassName gm cm =>
+          Checked.IsCompiledMethodAt
+            (embedClassTable p.classes) core definingClassName gm cm)
+        (embedMethod sourceMethod))
+    (lookup_def :
+      lookup =
+        Checked.isCompiledClassTable_findMethodInMro
+          classesCompiled
+          (findGMethodInMro_embed source_lookup)) :
+    SourceMethodLookupData
+      p.classes recvMro attrName sourceMethod lookup.definingClassName := by
+  rw [lookup_def]
+  exact sourceMethodLookupData_canonical p core cct classesCompiled source_lookup
+
+namespace Checked
+
+/-- The stored method translation proof determines the compiled method. -/
+private theorem IsCompiledMethodAt_unique
+    (left :
+      IsCompiledMethodAt gct hwfct cname gm cm₁)
+    (right :
+      IsCompiledMethodAt gct hwfct cname gm cm₂) :
+    cm₁ = cm₂ := by
+  cases cm₁ with
+  | mk name₁ receiverParam₁ param₁ paramTy₁ returnTy₁ parameterObligation₁ returnObligation₁ body₁ =>
+  cases cm₂ with
+  | mk name₂ receiverParam₂ param₂ paramTy₂ returnTy₂ parameterObligation₂ returnObligation₂ body₂ =>
+  have hname : name₁ = name₂ :=
+    left.name_eq.trans right.name_eq.symm
+  have hreceiver : receiverParam₁ = receiverParam₂ :=
+    left.receiverParam_eq.trans right.receiverParam_eq.symm
+  have hparam : param₁ = param₂ :=
+    left.param_eq.trans right.param_eq.symm
+  have hparamTy : paramTy₁ = paramTy₂ :=
+    left.paramTy_eq.trans right.paramTy_eq.symm
+  have hreturnTy : returnTy₁ = returnTy₂ :=
+    left.returnTy_eq.trans right.returnTy_eq.symm
+  have hparameterObligation : parameterObligation₁ = parameterObligation₂ :=
+    left.parameterObligation_eq.trans right.parameterObligation_eq.symm
+  have hreturnObligation : returnObligation₁ = returnObligation₂ :=
+    left.returnObligation_eq.trans right.returnObligation_eq.symm
+  have hbody : body₁ = body₂ := by
+    calc
+      body₁ =
+          compileCheck left.body_hsrc
+            [(gm.param, gm.paramTy), (gm.receiverParam, .class_ cname)]
+            .any
+            (.methodBody cname gm.name []) := left.body_eq
+      _ =
+          compileCheck right.body_hsrc
+            [(gm.param, gm.paramTy), (gm.receiverParam, .class_ cname)]
+            .any
+            (.methodBody cname gm.name []) :=
+          compileCheck_sourceCoherent left.body_hsrc right.body_hsrc
+            [(gm.param, gm.paramTy), (gm.receiverParam, .class_ cname)]
+            .any
+            (.methodBody cname gm.name [])
+      _ = body₂ := right.body_eq.symm
+  cases hname
+  cases hreceiver
+  cases hparam
+  cases hparamTy
+  cases hreturnTy
+  cases hparameterObligation
+  cases hreturnObligation
+  cases hbody
+  rfl
+
+end Checked
+
+/-- Exact source-to-checked method lookup produced by embedded static
+compilation for one runtime receiver MRO lookup. -/
+structure ExactEmbeddedMethodLookup
+    (p : Program)
+    (core : WellFormedGClassTableCore (embedClassTable p.classes))
+    (methodBodiesBridge : ∀ cname c m,
+      findClass p.classes cname = some c →
+      m ∈ c.methods →
+      EmbeddedExprBridge p.classes core
+        [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+        m.body
+        m.returnTy)
+    (cct : CheckedClassTable)
+    (classesCompiled :
+      Checked.IsCompiledClassTable
+        (embedClassTable p.classes) core cct)
+    (recvMro : List Identifier)
+    (attrName : Identifier)
+    (sourceMethod : Method)
+    (cm : CheckedMethod) : Type where
+  /-- Source lookup equality for the exact runtime receiver MRO. -/
+  source_lookup :
+    findMethodInMro p.classes recvMro attrName = some sourceMethod
+  /-- Checked lookup equality produced by the runtime step for the same MRO. -/
+  checked_lookup :
+    findCheckedMethodInMro cct recvMro attrName = some cm
+  /-- Transported lookup data from the compiled class table. -/
+  lookup :
+    RelatedHierarchyLookupData
+      findCheckedClass CheckedClass.methods CheckedMethod.name
+      cct recvMro attrName
+      (fun definingClassName gm cm =>
+        Checked.IsCompiledMethodAt
+          (embedClassTable p.classes) core definingClassName gm cm)
+      (embedMethod sourceMethod)
+  /-- The transported lookup is the canonical compiled lookup for `source_lookup`. -/
+  lookup_def :
+    lookup =
+      Checked.isCompiledClassTable_findMethodInMro
+        classesCompiled
+        (findGMethodInMro_embed source_lookup)
+  /-- Source-side data for the transported defining class. -/
+  source_data :
+    SourceMethodLookupData
+      p.classes recvMro attrName sourceMethod lookup.definingClassName
+  /-- The runtime checked method is the exact embedded compiler output. -/
+  compiled_method_eq :
+    cm =
+      compileEmbeddedMethod p core lookup.definingClassName sourceMethod
+        (methodBodiesBridge lookup.definingClassName
+          source_data.sourceClass
+          sourceMethod
+          source_data.findClass_source
+          source_data.method_mem_source).hsrc
+
+/-- Static typing, source bridges, and exact checked compiler output for one program. -/
+structure EmbeddedStaticElaboration (p : Program) : Type where
+  /-- The static table rules and permitted method check targets. -/
+  staticClassTable : EmbeddableStaticClassTable p.classes
+  /-- The static type assigned to the program main expression. -/
+  mainTy : Ty
+  /-- The typing and inheritance data for the translated class table. -/
+  core : WellFormedGClassTableCore (embedClassTable p.classes)
+  /-- The embedded gradual source bridge for the program main expression. -/
+  mainBridge : EmbeddedExprBridge p.classes core [] p.main mainTy
+  /-- Embedded gradual source bridges for method bodies. -/
+  methodBodiesBridge : ∀ cname c m,
+    findClass p.classes cname = some c →
+    m ∈ c.methods →
+    EmbeddedExprBridge p.classes core
+      [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
+      m.body
+      m.returnTy
+  /-- The gradual target requested for the checked main expression. -/
+  mainTarget : GTy
+  /-- The requested main target is the checked-runtime approximation of the main bridge type. -/
+  mainTarget_eq :
+    mainTarget = approxTarget mainBridge.srcTy
+  /-- The checked program produced by compiling the embedded gradual program. -/
+  cp : CheckedProgram
+  /-- The class-table compilation artifact for the checked program classes. -/
+  classesCompiled :
+    Checked.IsCompiledClassTable
+      (embedClassTable p.classes) core cp.classes
+  /-- Proof that each allocated runtime method is the translation of the method selected by source lookup. -/
+  methodLookupCompiled : ∀ {recvMro attrName sourceMethod cm},
+    findMethodInMro p.classes recvMro attrName = some sourceMethod →
+    findCheckedMethodInMro cp.classes recvMro attrName = some cm →
+    ExactEmbeddedMethodLookup p core methodBodiesBridge cp.classes
+      classesCompiled recvMro attrName sourceMethod cm
+  /-- The data-bearing checked elaboration artifact for the embedded gradual program. -/
+  compiled : Checked.ElaboratesProgramAt (embedProgram p) mainTarget cp
+  /-- Relate the checked program main expression to the compiler output for the
+  main bridge. -/
+  main_eq :
+    cp.main =
+      compileCheck mainBridge.hsrc [] mainTarget (.main [])
 
 def embedded_static_program_elaborates
     (hprog : BridgeableStaticProgram p) :
     EmbeddedStaticElaboration p := by
+  let classesCompiled :
+      Checked.IsCompiledClassTable
+        (embedClassTable p.classes)
+        hprog.core
+        (compileEmbeddedProgram hprog).classes :=
+    compileEmbeddedClasses_compiled
+      p
+      hprog.classTable
+      hprog.core
+      hprog.methodBodiesBridge
+      p.classes
+      (fun hc => hc)
   refine
-    { mainTy := hprog.static.mainTy
-      mainTyping := hprog.static.mainTyping
+    { staticClassTable := hprog.classTable
+      mainTy := hprog.mainTy
       core := hprog.core
       mainBridge := hprog.mainBridge
-      mainProvenance := hprog.mainProvenance
       methodBodiesBridge := hprog.methodBodiesBridge
-      methodBodiesProvenance := hprog.methodBodiesProvenance
-      mainTarget := approxTarget (embedClassTable p.classes) hprog.mainBridge.srcTy
+      mainTarget := approxTarget hprog.mainBridge.srcTy
       mainTarget_eq := rfl
       cp := compileEmbeddedProgram hprog
+      classesCompiled := classesCompiled
+      methodLookupCompiled := ?_
       compiled := ?_
       main_eq := rfl }
+  · intro recvMro attrName sourceMethod cm source_lookup checked_lookup
+    let lookup :=
+      Checked.isCompiledClassTable_findMethodInMro
+        classesCompiled
+        (findGMethodInMro_embed source_lookup)
+    let source_data :=
+      sourceMethodLookupData_at_compiledLookup
+        p
+        hprog.core
+        (compileEmbeddedProgram hprog).classes
+        classesCompiled
+        source_lookup
+        lookup
+        rfl
+    have hmember : lookup.member2 = cm := by
+      have hfound := lookup.found
+      have checked_lookup' :
+          findMemberInHierarchy findCheckedClass CheckedClass.methods CheckedMethod.name
+            (compileEmbeddedProgram hprog).classes recvMro attrName = some cm := by
+        simpa [findCheckedMethodInMro] using checked_lookup
+      rw [checked_lookup'] at hfound
+      exact (Option.some.inj hfound).symm
+    have hcomponent :
+        Checked.IsCompiledMethodAt
+          (embedClassTable p.classes)
+          hprog.core
+          lookup.definingClassName
+          (embedMethod sourceMethod)
+          (compileEmbeddedMethod p hprog.core lookup.definingClassName sourceMethod
+            (hprog.methodBodiesBridge lookup.definingClassName
+              source_data.sourceClass
+              sourceMethod
+              source_data.findClass_source
+              source_data.method_mem_source).hsrc) :=
+      compileEmbeddedMethod_compiled
+        p
+        hprog.core
+        hprog.methodBodiesBridge
+        source_data.findClass_source
+        source_data.method_mem_source
+    have hcompiled : lookup.member2 =
+        compileEmbeddedMethod p hprog.core lookup.definingClassName sourceMethod
+          (hprog.methodBodiesBridge lookup.definingClassName
+            source_data.sourceClass
+            sourceMethod
+            source_data.findClass_source
+            source_data.method_mem_source).hsrc :=
+      Checked.IsCompiledMethodAt_unique lookup.related hcomponent
+    exact
+      { source_lookup := source_lookup
+        checked_lookup := checked_lookup
+        lookup := lookup
+        lookup_def := rfl
+        source_data := source_data
+        compiled_method_eq := hmember.symm.trans hcompiled }
   refine
-    { classes_elab := ?_
-      hwfct := hprog.core
+    { hwfct := hprog.core
+      classes_elab := classesCompiled
       main_srcTy := hprog.mainBridge.srcTy
       main_hsrc := hprog.mainBridge.hsrc
       main_eq := rfl
-      target_runtimePublic := approxTarget_checkedTarget
-      target_wf := approxTarget_wellFormed hprog.mainBridge.srcWellFormed }
-  simpa [compileEmbeddedProgram] using
-    compileEmbeddedClasses_compiled (p := p) hprog p.classes (fun hc => hc)
-
-private theorem checkedMethod_body_static_bridge
-    (hprog : BridgeableStaticProgram p)
-    {cname : Identifier} {cc : CheckedClass} {cm : CheckedMethod}
-    (hfc : findCheckedClass (embedded_static_program_elaborates hprog).cp.classes cname = some cc)
-    (hmem : cm ∈ cc.methods) :
-    ∃ c m,
-      ∃ _hfind : findClass p.classes cname = some c,
-      ∃ _hm : m ∈ c.methods,
-        ∃ srcTy,
-        ∃ hsrc : GSrcInfer
-          (embedClassTable p.classes)
-          hprog.core
-          (embedTyEnv [(m.param, m.paramTy), (m.receiverParam, .class_ cname)])
-          (embedExpr m.body)
-          srcTy,
-        ∃ _bridge : EmbeddedExprBridge p.classes hprog.core
-          [(m.param, m.paramTy), (m.receiverParam, .class_ cname)]
-          m.body
-          m.returnTy,
-        cm.body =
-          (compileCheck
-            (.methodBody cname m.name)
-            hsrc
-            [(m.param, embedTy m.paramTy),
-             (m.receiverParam, .class_ cname)]
-            (embedTy m.returnTy)
-            0).1 := by
-  let helab := embedded_static_program_elaborates hprog
-  obtain ⟨gc, gm, hfg, hgm, hcm⟩ :=
-    Checked.traceMethodToSource helab.compiled.classes_elab hfc hmem
-  obtain ⟨gc', hfg', hgc⟩ :=
-    Checked.checkedClass_lookup_to_source helab.compiled hfc
-  have hgc' : gc = gc' := by
-    exact helab.compiled.hwfct.raw.classNamesUnique _ _
-      (findClass_mem hfg)
-      (findClass_mem hfg')
-      ((findGClass_name hfg).trans (findGClass_name hfg').symm)
-  subst gc'
-  obtain ⟨c, hfind, hgcEq⟩ := findClass_embedClassTable_reverse hfg
-  subst gc
-  rcases List.mem_map.mp hgm with ⟨m, hm, hgmEq⟩
-  subst gm
-  obtain ⟨cm', hcm'mem, hcm'⟩ := Checked.forall₂_mem_left hgc.methods_compiled hgm
-  have hcname : c.name = cname := findClass_name hfind
-  have hcm'cname :
-      Checked.IsCompiledMethodAt
-        (embedProgram p).classes
-        cname
-        (embedMethod m)
-        cm' := by
-    simpa [hcname] using hcm'
-  have hcmEq : cm = cm' :=
-    Checked.compiledMethod_named_unique helab.compiled.hwfct helab.compiled
-      hfc hmem hcm'mem hcm hcm'cname rfl
-  obtain ⟨hwfct', srcTy, hsrc', hbody'⟩ := hcm'cname.body_compiled
-  have hcore : hwfct' = hprog.core := Subsingleton.elim _ _
-  subst hcore
-  refine ⟨c, m, hfind, hm, srcTy, ?_,
-    hprog.methodBodiesBridge cname c m hfind hm, ?_⟩
-  · simpa [embedProgram, embedMethod]
-      using hsrc'
-  · simpa [hcmEq, hcname, embedMethod] using hbody'
-
-structure BindingOriginOk
-    (ct : ClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (surfaceEnv : TyEnv)
-    (env : CheckedEnv)
-    (Γ : CheckedTyEnv)
-    (x : Identifier) : Type where
-  surfaceTy : Ty
-  checkedTy : GTy
-  value : CheckedValue
-  hsurface : surfaceEnv.lookup x = some surfaceTy
-  henv : env.lookup x = some value
-  hchecked : Γ.lookup x = some checkedTy
-  viewWitness : ViewWitness ct (embedClassTable ct) cct heap surfaceTy value
-  checkedWitness : CheckedValueWitness (embedClassTable ct) cct heap value checkedTy
-
-structure EmbeddedEnvOk
-    (ct : ClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (surfaceEnv : TyEnv)
-    (env : CheckedEnv)
-    (Γ : CheckedTyEnv) : Type where
-  binding : ∀ x checkedTy, Γ.lookup x = some checkedTy →
-    BindingOriginOk ct cct heap surfaceEnv env Γ x
-
-def embeddedEnvOk_nil
-    (ct : ClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap) :
-    EmbeddedEnvOk ct cct heap ([] : TyEnv) [] [] where
-  binding := by
-    intro x checkedTy hlook
-    cases hlook
-
-def EmbeddedEnvOk.binding_lookup
-    (henvOk : EmbeddedEnvOk ct cct heap surfaceEnv env Γ)
-    (hlook : Γ.lookup x = some checkedTy) :
-    BindingOriginOk ct cct heap surfaceEnv env Γ x :=
-  henvOk.binding x checkedTy hlook
-
-def BindingOriginOk.heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (ok : BindingOriginOk ct cct heap surfaceEnv env Γ x) :
-    BindingOriginOk ct cct heap' surfaceEnv env Γ x where
-  surfaceTy := ok.surfaceTy
-  checkedTy := ok.checkedTy
-  value := ok.value
-  hsurface := ok.hsurface
-  henv := ok.henv
-  hchecked := ok.hchecked
-  viewWitness := viewWitness_heapMono hmono ok.viewWitness
-  checkedWitness := checkedValueWitness_heapMono hmono ok.checkedWitness
-
-def EmbeddedEnvOk.heapMono
-    (hmono : ∀ oid obj, heap.lookup oid = some obj → heap'.lookup oid = some obj)
-    (henvOk : EmbeddedEnvOk ct cct heap surfaceEnv env Γ) :
-    EmbeddedEnvOk ct cct heap' surfaceEnv env Γ where
-  binding := by
-    intro x checkedTy hlook
-    exact (henvOk.binding x checkedTy hlook).heapMono hmono
-
-structure EnforceFrameOk
-    (gct : GClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (v : CheckedValue) : Type where
-  target : GTy
-  runtimePublic : RuntimePublicAnnotation gct target
-  witness : CheckedValueWitness gct cct heap v target
-
-theorem enforceFrameOk_ok_witness
-    (ok : EnforceFrameOk gct cct heap v)
-    {c : BoundaryContract}
-    (hcb : c = compileBoundaryRaw ok.target)
-    (labels : BoundaryLabels c)
-    (hheap : CheckedHeapWellFormed gct cct heap)
-    (hwfct : WellFormedGClassTableCore gct)
-    (halign : Checked.AlignedCheckedClassTable gct cct) :
-    ∃ v',
-      EnforceValue gct heap v c labels (.ok v') ∧
-      CheckedValueWitness gct cct heap v' ok.target :=
-  by
-    subst hcb
-    exact
-      (Checked.checkedValueWitness_same_contract
-        ok.witness
-        ok.runtimePublic
-        hheap
-        hwfct
-        halign
-        (ℓ := labels)).1
-
-theorem enforceFrameOk_noBlame
-    (ok : EnforceFrameOk gct cct heap v)
-    {c : BoundaryContract}
-    (hcb : c = compileBoundaryRaw ok.target)
-    (labels : BoundaryLabels c)
-    (hheap : CheckedHeapWellFormed gct cct heap)
-    (hwfct : WellFormedGClassTableCore gct)
-    (halign : Checked.AlignedCheckedClassTable gct cct)
-    (henf :
-      EnforceValue gct heap v c labels (.blame labels.direct)) :
-    False := by
-  subst hcb
-  exact
-    (Checked.checkedValueWitness_same_contract
-      ok.witness
-      ok.runtimePublic
-      hheap
-      hwfct
-      halign
-      (ℓ := labels)).2 henf
-
-structure DynAttrAccessFrameOk
-    (ct : ClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (oid : Nat)
-    (attrName : Identifier) : Type where
-  recvTy : Ty
-  resultTy : Ty
-  attrSelection : AttrSelection ct recvTy attrName resultTy
-  recvWitness :
-    CheckedValueWitness
-      (embedClassTable ct)
-      cct
-      heap
-      (.objRef oid)
-      (embedTy recvTy)
-
-theorem dynAttrAccessFrameOk_notFound_impossible
-    (halign : Checked.AlignedCheckedClassTable (embedClassTable ct) cct)
-    (ok : DynAttrAccessFrameOk ct cct heap oid attrName)
-    {obj : CheckedHeapObject}
-    {gc : GClass}
-    {mro : List Identifier}
-    (hlookObj : heap.lookup oid = some obj)
-    (hfindCls : findGClass (embedClassTable ct) obj.className = some gc)
-    (hMro : GComputeMro (embedClassTable ct) gc mro)
-    (hnotfound : findCheckedMethodInMro cct mro attrName = none) :
-    False := by
-  obtain ⟨cm, recvObj, recvCls, recvMro, hlookRecv, hfindRecv, hmroRecv, hlookup⟩ :=
-    attrSelection_runtime_lookup_embed halign ok.attrSelection ok.recvWitness
-  rw [hlookObj] at hlookRecv
-  cases hlookRecv
-  obtain ⟨objCls, hfindObjCls, hgcEq⟩ := findClass_embedClassTable_reverse hfindCls
-  subst hgcEq
-  have hfindRecv' : findClass ct obj.className = some recvCls := hfindRecv
-  rw [hfindObjCls] at hfindRecv'
-  cases hfindRecv'
-  have hmroObj : ComputeMro ct recvCls mro := by
-    simpa using computeMro_embedClassTable_reverse hfindObjCls hMro
-  have hmroEq : recvMro = mro :=
-    determinism hmroRecv hmroObj
-  rw [hmroEq] at hlookup
-  simp [hnotfound] at hlookup
-
-structure AwaitArgumentFrameOk
-    (ct : ClassTable)
-    (cct : CheckedClassTable)
-    (heap : CheckedHeap)
-    (argVal : CheckedValue)
-    (recvOid : Nat)
-    (cm : CheckedMethod) : Type where
-  recvObj : CheckedHeapObject
-  hrecvLookup : heap.lookup recvOid = some recvObj
-  resolvedMethod :
-    CheckedMethodInReceiverMro
-      (embedClassTable ct)
-      cct
-      recvObj.className
-      cm
-  argWitness :
-    CheckedValueWitness
-      (embedClassTable ct)
-      cct
-      heap
-      argVal
-      cm.paramTy
-
-theorem awaitArgumentFrameOk_ok_witness
-    (halign : Checked.AlignedCheckedClassTable (embedClassTable ct) cct)
-    (ok : AwaitArgumentFrameOk ct cct heap argVal recvOid cm)
-    (hheap : CheckedHeapWellFormed (embedClassTable ct) cct heap)
-    (hwfct : WellFormedGClassTableCore (embedClassTable ct)) :
-    ∃ argVal',
-      EnforceValue
-        (embedClassTable ct)
-        heap
-        argVal
-        cm.parameterContract
-        cm.parameterLabels
-        (.ok argVal') ∧
-      CheckedValueWitness
-        (embedClassTable ct)
-        cct
-        heap
-        argVal'
-        cm.paramTy := by
-  have hcontracts := Checked.checkedMethodInReceiverMro_contracts halign ok.resolvedMethod
-  have htargets := Checked.checkedMethodInReceiverMro_runtimePublic halign ok.resolvedMethod
-  obtain ⟨argVal', henf, hwit⟩ :=
-    enforceFrameOk_ok_witness
-      { target := cm.paramTy
-        runtimePublic := runtimePublicAnnotation_mk htargets.1.2
-        witness := ok.argWitness }
-      hcontracts.1
-      cm.parameterLabels
-      hheap
-      hwfct
-      halign
-  exact ⟨argVal', henf, hwit⟩
-
-theorem awaitArgumentFrameOk_noBlame
-    (halign : Checked.AlignedCheckedClassTable (embedClassTable ct) cct)
-    (ok : AwaitArgumentFrameOk ct cct heap argVal recvOid cm)
-    (hheap : CheckedHeapWellFormed (embedClassTable ct) cct heap)
-    (hwfct : WellFormedGClassTableCore (embedClassTable ct))
-    (henf :
-      EnforceValue
-        (embedClassTable ct)
-        heap
-        argVal
-        cm.parameterContract
-        cm.parameterLabels
-        (.blame cm.parameterLabels.direct)) :
-    False := by
-  have hcontracts := Checked.checkedMethodInReceiverMro_contracts halign ok.resolvedMethod
-  have htargets := Checked.checkedMethodInReceiverMro_runtimePublic halign ok.resolvedMethod
-  exact
-    enforceFrameOk_noBlame
-      { target := cm.paramTy
-        runtimePublic := runtimePublicAnnotation_mk htargets.1.2
-        witness := ok.argWitness }
-      hcontracts.1
-      cm.parameterLabels
-      hheap
-      hwfct
-      halign
-      henf
-
-inductive StateOriginOk
-    (p : Program)
-    (helab : EmbeddedStaticElaboration p)
-    (heap : CheckedHeap)
-    (env : CheckedEnv)
-    (ctrl : Checked.Control)
-    (cont : Checked.Continuation) : Type where
-  | main :
-      ctrl = Checked.Control.expr helab.cp.main →
-      env = [] →
-      cont = ([] : Checked.Continuation) →
-      StateOriginOk p helab heap env ctrl cont
-
-structure StaticCheckedStateSafe
-    (p : Program)
-    (helab : EmbeddedStaticElaboration p)
-    (heap : CheckedHeap)
-    (env : CheckedEnv)
-    (ctrl : Checked.Control)
-    (cont : Checked.Continuation)
-    (expectedType : GTy) : Type where
-  Γ : CheckedTyEnv
-  outΓ : CheckedTyEnv
-  G : GTy
-  heapwf : CheckedHeapWellFormed (embedClassTable p.classes) helab.cp.classes heap
-  hwfct : WellFormedGClassTableCore (embedClassTable p.classes)
-  halign : Checked.AlignedCheckedClassTable (embedClassTable p.classes) helab.cp.classes
-  henv : CheckedEnvHasType (embedClassTable p.classes) helab.cp.classes heap env Γ
-  hctrl : Checked.CheckedControlHasType (embedClassTable p.classes) helab.cp.classes heap Γ ctrl G
-  hcont :
-    Checked.CheckedContinuationHasType
-      (embedClassTable p.classes)
-      helab.cp.classes
-      heap
-      Γ
-      G
-      outΓ
-      expectedType
-      cont
-  surfaceEnv : TyEnv
-  envOk : EmbeddedEnvOk p.classes helab.cp.classes heap surfaceEnv env Γ
-  originOk : StateOriginOk p helab heap env ctrl cont
-
-def StaticCheckedStateSafe.toCheckedStateSafe
-    (hsafe : StaticCheckedStateSafe p helab heap env ctrl cont expectedType) :
-    Checked.CheckedStateSafe
-      (embedClassTable p.classes)
-      helab.cp.classes
-      heap
-      env
-      ctrl
-      cont
-      expectedType :=
-  ⟨hsafe.Γ, hsafe.outΓ, hsafe.G, hsafe.hwfct, hsafe.heapwf,
-    hsafe.halign, hsafe.henv, hsafe.hctrl, hsafe.hcont⟩
-
-def embedded_static_initial_safe
-    (helab : EmbeddedStaticElaboration p) :
-    StaticCheckedStateSafe
-      p
-      helab
-      (Checked.initialState helab.cp).heap
-      (Checked.initialState helab.cp).env
-      (Checked.initialState helab.cp).control
-      (Checked.initialState helab.cp).continuation
-      (runtimePublicTy helab.mainTarget) := by
-  have htargetChecked :
-      RuntimePublicAnnotation (embedClassTable p.classes) helab.mainTarget := by
-    rw [helab.mainTarget_eq]
-    exact approxTarget_checkedTarget
-  have htargetWf :
-      WellFormedGTy (embedClassTable p.classes) helab.mainTarget := by
-    rw [helab.mainTarget_eq]
-    exact approxTarget_wellFormed helab.mainBridge.srcWellFormed
-  refine
-    { Γ := []
-      outΓ := []
-      G := runtimePublicTy helab.mainTarget
-      heapwf := Checked.checkedHeapInitial_wellFormed helab.core.raw
-      hwfct := helab.core
-      halign := Checked.alignedCheckedClassTable_of_compiled helab.compiled.hwfct helab.compiled.classes_elab
-      henv := ?_
-      hctrl := ?_
-      hcont := .nil
-      surfaceEnv := []
-      envOk := ?_
-      originOk := ?_ }
-  · intro x G hlook
-    cases hlook
-  · refine .expr ?_
-    simpa [helab.main_eq] using
-      (compileCheck_checked
-        .main
-        (henv := empty_embedTyEnv_ok)
-        (helab := .nil)
-        helab.core
-        htargetChecked
-        htargetWf
-        helab.mainBridge.hsrc)
-  · simpa [Checked.initialState, Checked.expressionState] using
-      embeddedEnvOk_nil p.classes helab.cp.classes CheckedHeap.initial
-  · simpa [Checked.initialState, Checked.expressionState] using
-      (StateOriginOk.main (p := p) (helab := helab) rfl rfl rfl)
-
-theorem stateOriginOk_not_blame
-    (horig : StateOriginOk p helab heap env ctrl cont) :
-    ctrl ≠ Checked.Control.blame ℓ := by
-  intro hblame
-  cases horig with
-  | main hctrl _ _ =>
-      rw [hblame] at hctrl
-      cases hctrl
-
-structure StaticStepClosedElaboration
-    (p : Program)
-    (helab : EmbeddedStaticElaboration p) : Type where
-  stepClosed :
-    ∀ {heap env ctrl cont expectedType s'},
-      StaticCheckedStateSafe p helab heap env ctrl cont expectedType →
-      Checked.Step
-        (embedClassTable p.classes)
-        helab.cp.classes
-        { heap, env, control := ctrl, continuation := cont }
-        s' →
-      StaticCheckedStateSafe
-        p
-        helab
-        s'.heap
-        s'.env
-        s'.control
-        s'.continuation
-        expectedType
-
-theorem static_checked_preservation_multi
-    (hclosed : StaticStepClosedElaboration p helab)
-    (hsafe : StaticCheckedStateSafe
-      p
-      helab
-      s.heap
-      s.env
-      s.control
-      s.continuation
-      expectedType)
-    (hsteps : Checked.Steps
-      (embedClassTable p.classes)
-      helab.cp.classes
-      s
-      finalState) :
-    Nonempty
-      (StaticCheckedStateSafe
-        p
-        helab
-        finalState.heap
-        finalState.env
-        finalState.control
-        finalState.continuation
-        expectedType) := by
-  induction hsteps generalizing expectedType with
-  | refl =>
-      exact ⟨hsafe⟩
-  | step hstep hrest ih =>
-      rcases ih (hclosed.stepClosed hsafe hstep) with ⟨hsafe'⟩
-      exact ⟨hsafe'⟩
-
-theorem finalResult_blame_control
-    (hfinal : Checked.finalResult? s = some (heap', CheckedResult.blame ℓ)) :
-    s.control = Checked.Control.blame ℓ ∧ s.continuation = [] := by
-  cases s with
-  | mk heap env control continuation =>
-      cases control with
-      | expr e =>
-          cases continuation <;> simp [Checked.finalResult?] at hfinal
-      | val v =>
-          cases continuation <;> simp [Checked.finalResult?] at hfinal
-      | blame lbl =>
-          cases continuation with
-          | nil =>
-              simp [Checked.finalResult?] at hfinal
-              rcases hfinal with ⟨_, hℓ⟩
-              cases hℓ
-              exact ⟨rfl, rfl⟩
-          | cons hd tl =>
-              simp [Checked.finalResult?] at hfinal
-      | runtimeError err =>
-          cases continuation <;> simp [Checked.finalResult?] at hfinal
-
-theorem embedded_static_program_success_or_blame
-    (helab : EmbeddedStaticElaboration p)
-    (hsteps : Checked.Steps
-      (embedClassTable p.classes)
-      helab.cp.classes
-      (Checked.initialState helab.cp)
-      finalState)
-    (hfinal : Checked.finalResult? finalState = some (heap', result)) :
-    (∃ v, result = CheckedResult.success v ∧
-      CheckedValueWitness
-        (embedClassTable p.classes)
-        helab.cp.classes
-        heap'
-        v
-        (runtimePublicTy helab.mainTarget)) ∨
-    (∃ ℓ, result = CheckedResult.blame ℓ) := by
-  exact Checked.gradual_soundness_at helab.compiled hsteps hfinal
-
-theorem embedded_static_program_success_of_no_blame
-    (helab : EmbeddedStaticElaboration p)
-    (hnoblame :
-      ∀ {finalState heap' ℓ},
-        Checked.Steps
-          (embedClassTable p.classes)
-          helab.cp.classes
-          (Checked.initialState helab.cp)
-          finalState →
-        Checked.finalResult? finalState = some (heap', CheckedResult.blame ℓ) →
-        False)
-    (hsteps : Checked.Steps
-      (embedClassTable p.classes)
-      helab.cp.classes
-      (Checked.initialState helab.cp)
-      finalState)
-    (hfinal : Checked.finalResult? finalState = some (heap', result)) :
-    ∃ v, result = CheckedResult.success v := by
-  cases embedded_static_program_success_or_blame helab hsteps hfinal with
-  | inl hsuccess =>
-      rcases hsuccess with ⟨v, hresult, _⟩
-      exact ⟨v, hresult⟩
-  | inr hblame =>
-      rcases hblame with ⟨ℓ, hresult⟩
-      exact False.elim (hnoblame hsteps (hresult ▸ hfinal))
-
-theorem embedded_static_no_blame
-    (helab : EmbeddedStaticElaboration p)
-    (hclosed : StaticStepClosedElaboration p helab)
-    (hsteps : Checked.Steps
-      (embedClassTable p.classes)
-      helab.cp.classes
-      (Checked.initialState helab.cp)
-      finalState)
-    (hfinal : Checked.finalResult? finalState = some (heap', CheckedResult.blame ℓ)) :
-    False := by
-  have hsafe :=
-    static_checked_preservation_multi
-      (p := p)
-      (helab := helab)
-      hclosed
-      (embedded_static_initial_safe helab)
-      hsteps
-  rcases hsafe with ⟨hsafeFinal⟩
-  have hnotBlame : finalState.control ≠ Checked.Control.blame ℓ :=
-    stateOriginOk_not_blame hsafeFinal.originOk
-  obtain ⟨hctrl, _⟩ := finalResult_blame_control hfinal
-  exact hnotBlame hctrl
-
-theorem embedded_static_success
-    (helab : EmbeddedStaticElaboration p)
-    (hclosed : StaticStepClosedElaboration p helab)
-    (hsteps : Checked.Steps
-      (embedClassTable p.classes)
-      helab.cp.classes
-      (Checked.initialState helab.cp)
-      finalState)
-    (hfinal : Checked.finalResult? finalState = some (heap', result)) :
-    ∃ v, result = CheckedResult.success v :=
-  embedded_static_program_success_of_no_blame helab
-    (fun hsteps' hfinal' => embedded_static_no_blame helab hclosed hsteps' hfinal')
-    hsteps hfinal
+      target_checkedTarget :=
+        approxTarget_checkedTarget
+          (gct := embedClassTable p.classes)
+          (G := hprog.mainBridge.srcTy)
+      target_wf := approxTarget_wellFormed
+        (gSrcInfer_sourceWellFormed (by nofun) hprog.mainBridge.hsrc) }

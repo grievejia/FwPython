@@ -1,5 +1,5 @@
 import FwPython.Common.ClassModel
-import FwPython.Static.MRO.C3
+import FwPython.Common.MRO.C3
 import FwPython.Builtins
 
 /-! # MRO core parameterized over the method payload. -/
@@ -172,6 +172,25 @@ theorem determinism {Method : Type}
         rfl)
     h1
   exact key mro₂ h2
+
+/-- Preserving every successful parent lookup preserves MRO computation. -/
+theorem ComputeMro.transport {Method : Type} {original extended : ClassTableDecl Method}
+    (preserved : ∀ name declaration, findClass original name = some declaration →
+      findClass extended name = some declaration)
+    {declaration : ClassDecl Method} {mro : List Identifier}
+    (computed : ComputeMro original declaration mro) : ComputeMro extended declaration mro := by
+  exact ComputeMro.rec
+    (motive_1 := fun table bases mros _ =>
+      (∀ name declaration, findClass table name = some declaration →
+        findClass extended name = some declaration) → AllParentMros extended bases mros)
+    (motive_2 := fun table declaration mro _ =>
+      (∀ name declaration, findClass table name = some declaration →
+        findClass extended name = some declaration) → ComputeMro extended declaration mro)
+    (fun _ => .nil)
+    (fun lookup _ _ parent rest preserved => .cons (preserved _ _ lookup) (parent preserved) (rest preserved))
+    (fun root _ => .root root)
+    (fun bases nonempty _ merged parents preserved => .step bases nonempty (parents preserved) merged)
+    computed preserved
 
 /-- Find a method by searching each class in the MRO in order. -/
 abbrev findMethodInMro {Ty : Type} {Expr : Type}

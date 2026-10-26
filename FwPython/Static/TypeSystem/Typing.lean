@@ -9,66 +9,67 @@ This file is definition-only and remains below theorem-heavy modules such as
 `WellFormedness`, `Invariants`, and runtime preservation/progress proofs.
 -/
 
-/-- Surface typing in the source-facing static language. -/
-inductive HasType : ClassTable → TyEnv → Expr → Ty → Prop where
+/-- An expression has a static type under one hierarchy and variable environment.
+Every recursive typing premise and subtype comparison uses that same table. -/
+inductive HasType {ct : ClassTable} (structural : WellFormedClassHierarchy ct) : TyEnv → Expr → Ty → Prop where
+  /-- Widen the expression's type through subtyping, which certifies both types' validity. -/
   | sub :
-      HasType ct Γ e S →
-      IsSubtype ct S T →
-      WellFormedTy ct T →
-      HasType ct Γ e T
+      HasType structural Γ e S →
+      IsSubtype structural S T →
+      HasType structural Γ e T
   | var :
       Γ.lookup x = some T →
-      HasType ct Γ (.var x) T
+      HasType structural Γ (.var x) T
   | constNone :
-      HasType ct Γ .constNone (.class_ noneClass)
+      HasType structural Γ .constNone (.class_ noneClass)
   | constTrue :
-      HasType ct Γ .constTrue (.class_ boolClass)
+      HasType structural Γ .constTrue (.class_ boolClass)
   | constFalse :
-      HasType ct Γ .constFalse (.class_ boolClass)
+      HasType structural Γ .constFalse (.class_ boolClass)
   | new :
       findClass ct cname = some c →
       cname ≠ boolClass →
       cname ≠ noneClass →
       cname ≠ boundMethodClass →
-      HasType ct Γ (.new cname) (.class_ cname)
+      HasType structural Γ (.new cname) (.class_ cname)
   | attrAccess :
-      HasType ct Γ base (.class_ cname) →
+      HasType structural Γ base (.class_ cname) →
       FindMethodType ct cname attrName paramTy returnTy →
-      HasType ct Γ (.attrAccess base attrName) (.callable paramTy returnTy)
+      HasType structural Γ (.attrAccess base attrName) (.callable paramTy returnTy)
   | attrAccessUnion :
-      HasType ct Γ base (.union (.class_ c1) (.class_ c2)) →
+      HasType structural Γ base (.union (.class_ c1) (.class_ c2)) →
       FindMethodType ct c1 attrName p1 r1 →
       FindMethodType ct c2 attrName p2 r2 →
-      HasType ct Γ (.attrAccess base attrName)
+      HasType structural Γ (.attrAccess base attrName)
         (.union (.callable p1 r1) (.callable p2 r2))
   | call :
-      HasType ct Γ callee (.callable paramTy returnTy) →
-      HasType ct Γ arg argTy →
-      IsSubtype ct argTy paramTy →
-      HasType ct Γ (.call callee arg) returnTy
+      HasType structural Γ callee (.callable paramTy returnTy) →
+      HasType structural Γ arg argTy →
+      IsSubtype structural argTy paramTy →
+      HasType structural Γ (.call callee arg) returnTy
   | cond :
-      HasType ct Γ condExpr testTy →
-      IsSubtype ct testTy (.class_ boolClass) →
-      HasType ct Γ thenBr thenTy →
-      HasType ct Γ elseBr elseTy →
-      HasType ct Γ (.cond condExpr thenBr elseBr) (.union thenTy elseTy)
+      HasType structural Γ condExpr testTy →
+      IsSubtype structural testTy (.class_ boolClass) →
+      HasType structural Γ thenBr thenTy →
+      HasType structural Γ elseBr elseTy →
+      HasType structural Γ (.cond condExpr thenBr elseBr) (.union thenTy elseTy)
   | isInstance :
       Γ.lookup x = some T →
       findClass ct C = some cls →
-      HasType ct Γ (.isInstance x C) (.class_ boolClass)
+      HasType structural Γ (.isInstance x C) (.class_ boolClass)
   | condIsInstance :
       Γ.lookup x = some T →
       findClass ct C = some cls →
-      HasType ct
+      HasType structural
         (Γ.update x (.intersection T (.class_ C)))
         thenBr thenTy →
-      HasType ct
+      HasType structural
         (Γ.update x (.intersection T (.negClass C)))
         elseBr elseTy →
-      HasType ct Γ
+      HasType structural Γ
         (.cond (.isInstance x C) thenBr elseBr)
         (.union thenTy elseTy)
   | interIntro :
-      HasType ct Γ e T →
-      HasType ct Γ e U →
-      HasType ct Γ e (.intersection T U)
+      HasType structural Γ e T →
+      HasType structural Γ e U →
+      HasType structural Γ e (.intersection T U)

@@ -68,7 +68,7 @@ mutual
         CheckedValueWitnessData gct cct heap v (.intersection G H)
     | negClass :
         CheckedAnyShape gct cct heap v →
-        (∀ ℓ, EnforceValue gct heap v (compileBoundaryRaw (.negClass cname)) ℓ (.ok v)) →
+        EnforceValue gct heap v (compileBoundaryRaw (.negClass cname)) .ok →
         CheckedValueWitnessData gct cct heap v (.negClass cname)
 end
 

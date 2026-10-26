@@ -1,26 +1,28 @@
 import FwPython.Static.TypeSystem.TypingLemmas
 import FwPython.Static.TypeSystem.Algorithmic.Lookup
-import FwPython.Static.Subtyping.Completeness.Decision
+import FwPython.Static.Subtyping.Decision
 
 /-! ## Algorithmic attribute enumeration -/
 
+open FwPython.Static.Subtyping
+
+variable {ct : ClassTable} {structural : WellFormedClassHierarchy ct}
+
+/-- Successful method-type lookup establishes that the receiver class name is known. -/
 private theorem findMethodType_class_wellFormed
     (hfmt : FindMethodType ct cname attrName paramTy returnTy) :
     WellFormedTy ct (.class_ cname) := by
-  obtain ⟨_, _, _, hfind, hmro, _, _, _⟩ := hfmt
-  exact .class_ hfind hmro
+  obtain ⟨_, _, _, hfind, _, _, _, _⟩ := hfmt
+  exact WellFormedTy.class_of_lookup hfind
 
-private theorem findMethodType_callable_wellFormed
-    (hwfct : WellFormedClassTable ct)
-    (hfmt : FindMethodType ct cname attrName paramTy returnTy) :
-    WellFormedTy ct (.callable paramTy returnTy) :=
-  (findMethodType_wellFormed hwfct hfmt).elim .callable
-
+/-- Method declarations that justify an attribute result for a class, union, or intersection receiver. -/
 private inductive AttrCase (ct : ClassTable) :
-    Ty → Identifier → Ty → Type where
+    Ty → Identifier → Ty → Prop where
+  /-- The named receiver class supplies the method. -/
   | class_ :
       FindMethodType ct cname attrName paramTy returnTy →
       AttrCase ct (.class_ cname) attrName (.callable paramTy returnTy)
+  /-- Either receiver class supplies its own method requirement. -/
   | union :
       FindMethodType ct c1 attrName p1 r1 →
       FindMethodType ct c2 attrName p2 r2 →
@@ -28,6 +30,7 @@ private inductive AttrCase (ct : ClassTable) :
         (.union (.class_ c1) (.class_ c2))
         attrName
         (.union (.callable p1 r1) (.callable p2 r2))
+  /-- The receiver satisfies both classes and both method requirements. -/
   | inter :
       FindMethodType ct c1 attrName p1 r1 →
       FindMethodType ct c2 attrName p2 r2 →
@@ -36,186 +39,104 @@ private inductive AttrCase (ct : ClassTable) :
         attrName
         (.intersection (.callable p1 r1) (.callable p2 r2))
 
-private theorem AttrCase.receiver_wellFormed :
-    AttrCase ct recvTy attrName resultTy → WellFormedTy ct recvTy
-  | .class_ hfmt => findMethodType_class_wellFormed hfmt
-  | .union hfmt1 hfmt2 =>
-      .union (findMethodType_class_wellFormed hfmt1) (findMethodType_class_wellFormed hfmt2)
-  | .inter hfmt1 hfmt2 =>
-      .intersection (findMethodType_class_wellFormed hfmt1) (findMethodType_class_wellFormed hfmt2)
+/-- A valid receiver type, its attribute result, and the method declarations that justify it. -/
+structure AttrReceiverView (ct : ClassTable) (attr : Identifier) where
+  /-- The receiver type for which these method declarations apply. -/
+  receiver : WellFormedType (ct.map ClassDecl.name)
+  /-- The type of the bound method produced by attribute access. -/
+  result : WellFormedType (ct.map ClassDecl.name)
+  /-- Method lookup evidence for the class combination represented by the receiver. -/
+  private selection : AttrCase ct receiver.raw attr result.raw
 
-private theorem AttrCase.result_wellFormed (hwfct : WellFormedClassTable ct) :
-    AttrCase ct recvTy attrName resultTy → WellFormedTy ct resultTy
-  | .class_ hfmt => findMethodType_callable_wellFormed hwfct hfmt
-  | .union hfmt1 hfmt2 =>
-      .union (findMethodType_callable_wellFormed hwfct hfmt1)
-        (findMethodType_callable_wellFormed hwfct hfmt2)
-  | .inter hfmt1 hfmt2 =>
-      .intersection (findMethodType_callable_wellFormed hwfct hfmt1)
-        (findMethodType_callable_wellFormed hwfct hfmt2)
-
+/-- A method declaration provides the valid receiver and function result together. -/
 private def singleAttrReceiverViews
-    (hwfct : WellFormedClassTable ct)
-    (attr : Identifier) (c : Identifier) : List (Ty × Ty) :=
-  match staticLookupMethodTy? hwfct c attr with
-  | some (p, r) => [(.class_ c, .callable p r)]
+    (hwfct : WellTypedClassHierarchy ct) (attr c : Identifier) : List (AttrReceiverView ct attr) :=
+  match (staticLookupMethodTy? hwfct c attr).attach with
+  | some ⟨(_p, _r), found⟩ =>
+      let selected := staticLookupMethodTy?_find hwfct found
+      [{ receiver := (findMethodType_class_wellFormed selected).toType
+         result := (findMethodType_wellFormed hwfct selected).toType
+         selection := .class_ selected }]
   | none => []
 
+/-- Two selected methods provide union and intersection receiver alternatives. -/
 private def pairAttrReceiverViews
-    (hwfct : WellFormedClassTable ct)
-    (attr : Identifier) (c1 c2 : Identifier) : List (Ty × Ty) :=
-  match staticLookupMethodTy? hwfct c1 attr, staticLookupMethodTy? hwfct c2 attr with
-  | some (p1, r1), some (p2, r2) =>
-      [ ( .union (.class_ c1) (.class_ c2)
-        , .union (.callable p1 r1) (.callable p2 r2))
-      , ( .intersection (.class_ c1) (.class_ c2)
-        , .intersection (.callable p1 r1) (.callable p2 r2)) ]
+    (hwfct : WellTypedClassHierarchy ct) (attr c1 c2 : Identifier) : List (AttrReceiverView ct attr) :=
+  match (staticLookupMethodTy? hwfct c1 attr).attach, (staticLookupMethodTy? hwfct c2 attr).attach with
+  | some ⟨(_p1, _r1), found1⟩, some ⟨(_p2, _r2), found2⟩ =>
+      let first := staticLookupMethodTy?_find hwfct found1
+      let second := staticLookupMethodTy?_find hwfct found2
+      let firstReceiver := (findMethodType_class_wellFormed first).toType
+      let secondReceiver := (findMethodType_class_wellFormed second).toType
+      let firstResult := (findMethodType_wellFormed hwfct first).toType
+      let secondResult := (findMethodType_wellFormed hwfct second).toType
+      [{ receiver := .union firstReceiver secondReceiver, result := .union firstResult secondResult,
+         selection := .union first second },
+       { receiver := .intersection firstReceiver secondReceiver, result := .intersection firstResult secondResult,
+         selection := .inter first second }]
   | _, _ => []
 
-def allAttrReceiverViews
-    (hwfct : WellFormedClassTable ct)
-    (attr : Identifier) : List (Ty × Ty) :=
-  let names := classNameList ct
+/-- Receiver alternatives with their valid result types and method lookup evidence. -/
+def attrReceiverViews (hwfct : WellTypedClassHierarchy ct) (attr : Identifier) :
+    List (AttrReceiverView ct attr) :=
+  let names := ct.map ClassDecl.name
   names.flatMap (singleAttrReceiverViews hwfct attr) ++
     names.flatMap (fun c1 => names.flatMap (pairAttrReceiverViews hwfct attr c1))
 
-private theorem singleAttrReceiverViews_mem_case
-    (hwfct : WellFormedClassTable ct)
-    (hmem : (viewTy, resultTy) ∈ singleAttrReceiverViews hwfct attr c) :
-    Nonempty (AttrCase ct viewTy attr resultTy) := by
-  unfold singleAttrReceiverViews at hmem
-  cases hlookup : staticLookupMethodTy? hwfct c attr with
-  | none =>
-      simp [hlookup] at hmem
-  | some pr =>
-      rcases pr with ⟨p, r⟩
-      simp [hlookup] at hmem
-      rcases hmem with ⟨rfl, rfl⟩
-      exact ⟨.class_ ((staticLookupMethodTy?_some_iff_findMethodType hwfct).1 hlookup)⟩
-
-private theorem pairAttrReceiverViews_mem_case
-    (hwfct : WellFormedClassTable ct)
-    (hmem : (viewTy, resultTy) ∈ pairAttrReceiverViews hwfct attr c1 c2) :
-    Nonempty (AttrCase ct viewTy attr resultTy) := by
-  unfold pairAttrReceiverViews at hmem
-  cases hlookup1 : staticLookupMethodTy? hwfct c1 attr with
-  | none =>
-      simp [hlookup1] at hmem
-  | some pr1 =>
-      rcases pr1 with ⟨p1, r1⟩
-      cases hlookup2 : staticLookupMethodTy? hwfct c2 attr with
-      | none =>
-          simp [hlookup1, hlookup2] at hmem
-      | some pr2 =>
-          rcases pr2 with ⟨p2, r2⟩
-          simp [hlookup1, hlookup2] at hmem
-          rcases hmem with hmem | hmem
-          · rcases hmem with ⟨rfl, rfl⟩
-            exact ⟨.union
-              ((staticLookupMethodTy?_some_iff_findMethodType hwfct).1 hlookup1)
-              ((staticLookupMethodTy?_some_iff_findMethodType hwfct).1 hlookup2)⟩
-          · rcases hmem with ⟨rfl, rfl⟩
-            exact ⟨.inter
-              ((staticLookupMethodTy?_some_iff_findMethodType hwfct).1 hlookup1)
-              ((staticLookupMethodTy?_some_iff_findMethodType hwfct).1 hlookup2)⟩
-
-private theorem allAttrReceiverViews_member_case
-    (hwfct : WellFormedClassTable ct)
-    (hmem : (viewTy, resultTy) ∈ allAttrReceiverViews hwfct attr) :
-    Nonempty (AttrCase ct viewTy attr resultTy) := by
-  unfold allAttrReceiverViews at hmem
-  rcases List.mem_append.mp hmem with hmem | hmem
-  · simp at hmem
-    rcases hmem with ⟨c, _, hmem⟩
-    exact singleAttrReceiverViews_mem_case hwfct hmem
-  · simp at hmem
-    rcases hmem with ⟨c1, _, c2, _, hmem⟩
-    exact pairAttrReceiverViews_mem_case hwfct hmem
-
-theorem allAttrReceiverViews_member_wellFormed
-    (hwfct : WellFormedClassTable ct)
-    (hmem : (viewTy, resultTy) ∈ allAttrReceiverViews hwfct attr) :
-    WellFormedTy ct viewTy ∧ WellFormedTy ct resultTy := by
-  obtain ⟨hcase⟩ := allAttrReceiverViews_member_case (hwfct := hwfct) hmem
-  exact ⟨hcase.receiver_wellFormed, hcase.result_wellFormed hwfct⟩
-
-private theorem allAttrReceiverViews_member_of_case
-    (hwfct : WellFormedClassTable ct)
-    (hcase : AttrCase ct viewTy attr resultTy) :
-    (viewTy, resultTy) ∈ allAttrReceiverViews hwfct attr := by
-  cases hcase with
-  | class_ hfmt =>
-      have hlookup := staticLookupMethodTy?_of_find hwfct hfmt
-      obtain ⟨cls, _, _, hfind, _, _, _, _⟩ := hfmt
-      refine List.mem_append.mpr (Or.inl ?_)
-      simp [singleAttrReceiverViews]
-      refine ⟨cls.name, findClass_some_mem_classNameList (findClass_self hfind), ?_⟩
-      simp [findClass_name hfind, hlookup]
-  | union hfmt1 hfmt2 | inter hfmt1 hfmt2 =>
-      have hlookup1 := staticLookupMethodTy?_of_find hwfct hfmt1
-      have hlookup2 := staticLookupMethodTy?_of_find hwfct hfmt2
-      obtain ⟨cls1, _, _, hfind1, _, _, _, _⟩ := hfmt1
-      obtain ⟨cls2, _, _, hfind2, _, _, _, _⟩ := hfmt2
-      refine List.mem_append.mpr (Or.inr ?_)
-      simp [pairAttrReceiverViews]
-      refine ⟨cls1.name, findClass_some_mem_classNameList (findClass_self hfind1), cls2.name,
-        findClass_some_mem_classNameList (findClass_self hfind2), ?_⟩
-      simp [findClass_name hfind1, findClass_name hfind2, hlookup1, hlookup2]
-
+/-- A selected class method occurs in the packaged receiver enumeration. -/
 theorem attrReceiverView_class_member
-    (hwfct : WellFormedClassTable ct)
-    (hfmt : FindMethodType ct c attr p r) :
-    ((.class_ c), (.callable p r)) ∈ allAttrReceiverViews hwfct attr :=
-  allAttrReceiverViews_member_of_case hwfct (.class_ hfmt)
+    (hwfct : WellTypedClassHierarchy ct) (hfmt : FindMethodType ct c attr p r) :
+    ∃ view ∈ attrReceiverViews hwfct attr,
+      view.receiver.raw = .class_ c ∧ view.result.raw = .callable p r := by
+  have hlookup := staticLookupMethodTy?_of_find hwfct hfmt
+  let view : AttrReceiverView ct attr :=
+    ⟨(findMethodType_class_wellFormed hfmt).toType,
+      (findMethodType_wellFormed hwfct hfmt).toType, .class_ hfmt⟩
+  refine ⟨view, List.mem_append.mpr (Or.inl (List.mem_flatMap.mpr ?_)), rfl, rfl⟩
+  obtain ⟨cls, _, _, hfind, _, _, _, _⟩ := hfmt
+  refine ⟨cls.name, findClass_name_known (findClass_self hfind), ?_⟩
+  rw [findClass_name hfind]
+  simp [singleAttrReceiverViews, Option.attach_eq_some _ ⟨_, hlookup⟩, view,
+    WellFormedTy.toType]
 
+/-- Two selected class methods supply a packaged union receiver and result. -/
 theorem attrReceiverView_union_member
-    (hwfct : WellFormedClassTable ct)
-    (hfmt1 : FindMethodType ct c1 attr p1 r1)
-    (hfmt2 : FindMethodType ct c2 attr p2 r2) :
-    ((.union (.class_ c1) (.class_ c2)),
-      (.union (.callable p1 r1) (.callable p2 r2))) ∈
-      allAttrReceiverViews hwfct attr :=
-  allAttrReceiverViews_member_of_case hwfct (.union hfmt1 hfmt2)
+    (hwfct : WellTypedClassHierarchy ct)
+    (hfmt1 : FindMethodType ct c1 attr p1 r1) (hfmt2 : FindMethodType ct c2 attr p2 r2) :
+    ∃ view ∈ attrReceiverViews hwfct attr,
+      view.receiver.raw = .union (.class_ c1) (.class_ c2) ∧
+      view.result.raw = .union (.callable p1 r1) (.callable p2 r2) := by
+  have hlookup1 := staticLookupMethodTy?_of_find hwfct hfmt1
+  have hlookup2 := staticLookupMethodTy?_of_find hwfct hfmt2
+  let view : AttrReceiverView ct attr :=
+    ⟨.union (findMethodType_class_wellFormed hfmt1).toType (findMethodType_class_wellFormed hfmt2).toType,
+      .union (findMethodType_wellFormed hwfct hfmt1).toType
+        (findMethodType_wellFormed hwfct hfmt2).toType, .union hfmt1 hfmt2⟩
+  refine ⟨view, List.mem_append.mpr (Or.inr (List.mem_flatMap.mpr ?_)), rfl, rfl⟩
+  obtain ⟨cls1, _, _, hfind1, _, _, _, _⟩ := hfmt1
+  obtain ⟨cls2, _, _, hfind2, _, _, _, _⟩ := hfmt2
+  refine ⟨cls1.name, findClass_name_known (findClass_self hfind1),
+    List.mem_flatMap.mpr ⟨cls2.name, findClass_name_known (findClass_self hfind2), ?_⟩⟩
+  rw [findClass_name hfind1, findClass_name hfind2]
+  simp [pairAttrReceiverViews, Option.attach_eq_some _ ⟨_, hlookup1⟩,
+    Option.attach_eq_some _ ⟨_, hlookup2⟩, view, WellFormedTy.toType, WellFormedType.union]
 
-private def attrResultsFromEntry
-    (hwfct : WellFormedClassTable ct)
-    (sourceTy : Ty) (hwfSource : WellFormedTy ct sourceTy)
-    (attr : Identifier)
-    (entry : { pr // pr ∈ allAttrReceiverViews hwfct attr }) : List Ty := by
-  let viewTy := entry.1.1
-  let resultTy := entry.1.2
-  let hwfView :=
-    (allAttrReceiverViews_member_wellFormed
-      (hwfct := hwfct) (attr := attr) entry.2).1
-  let _ : Decidable (IsSubtype ct sourceTy viewTy) :=
-    isSubtype_decidable (ct := ct) (T := sourceTy) (U := viewTy)
-      hwfct hwfSource hwfView
-  exact if hsub : IsSubtype ct sourceTy viewTy then [resultTy] else []
+/-- Valid result types for receiver alternatives that contain the source type. -/
+def attrResultsFromTy (hwfct : WellTypedClassHierarchy ct)
+    (source : WellFormedType (ct.map ClassDecl.name)) (attr : Identifier) :
+    List (WellFormedType (ct.map ClassDecl.name)) :=
+  (attrReceiverViews hwfct attr).flatMap fun view =>
+    letI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy source view.receiver
+    if IsSubtype hwfct.toWellFormedClassHierarchy source.raw view.receiver.raw then [view.result] else []
 
-def attrResultsFromTy (hwfct : WellFormedClassTable ct)
-    (sourceTy : Ty) (hwfSource : WellFormedTy ct sourceTy)
-    (attr : Identifier) : List Ty :=
-  (allAttrReceiverViews hwfct attr).attach.flatMap
-    (attrResultsFromEntry hwfct sourceTy hwfSource attr)
-
-private theorem attrResultsFromTy_member_witness
-    (hwfct : WellFormedClassTable ct)
-    (hmem : R ∈ attrResultsFromTy hwfct sourceTy hwfSource attr) :
-    ∃ viewTy,
-      (viewTy, R) ∈ allAttrReceiverViews hwfct attr ∧
-        IsSubtype ct sourceTy viewTy := by
-  unfold attrResultsFromTy at hmem
-  simp [attrResultsFromEntry] at hmem
-  rcases hmem with ⟨viewTy, hsub, hviewMem⟩
-  exact ⟨viewTy, hviewMem, hsub⟩
-
+/-- A receiver subtype and a method-selection case give a type for the attribute access. -/
 private theorem hasType_attrAccess_of_case
-    (hbase : HasType ct Γ base sourceTy)
-    (hsub : IsSubtype ct sourceTy viewTy)
+    (hbase : HasType structural Γ base sourceTy)
+    (hsub : IsSubtype structural sourceTy viewTy)
     (hcase : AttrCase ct viewTy attr R) :
-    HasType ct Γ (.attrAccess base attr) R := by
-  have hbaseView : HasType ct Γ base viewTy :=
-    .sub hbase hsub hcase.receiver_wellFormed
+    HasType structural Γ (.attrAccess base attr) R := by
+  have hbaseView : HasType structural Γ base viewTy :=
+    .sub hbase hsub
   cases hcase with
   | class_ hfmt =>
       exact .attrAccess hbaseView hfmt
@@ -223,27 +144,30 @@ private theorem hasType_attrAccess_of_case
       exact .attrAccessUnion hbaseView hfmt1 hfmt2
   | inter hfmt1 hfmt2 =>
       exact HasType.attrAccessInter
-        (.sub hbaseView (.interLeft .refl) (findMethodType_class_wellFormed hfmt1))
-        (.sub hbaseView (.interRight .refl) (findMethodType_class_wellFormed hfmt2))
+        (.sub hbaseView (.interLeft (.refl (findMethodType_class_wellFormed hfmt1)) (findMethodType_class_wellFormed hfmt2)))
+        (.sub hbaseView (.interRight (.refl (findMethodType_class_wellFormed hfmt2)) (findMethodType_class_wellFormed hfmt1)))
         hfmt1 hfmt2
 
+/-- Each selected method result is a declarative type of the attribute expression. -/
 theorem attrResultsFromTy_sound
-    (hwfct : WellFormedClassTable ct)
-    (hmem : R ∈ attrResultsFromTy hwfct sourceTy hwfSource attr)
-    (hbase : HasType ct Γ base sourceTy) :
-    HasType ct Γ (.attrAccess base attr) R := by
-  obtain ⟨viewTy, hviewMem, hsub⟩ :=
-    attrResultsFromTy_member_witness
-      (hwfct := hwfct) (sourceTy := sourceTy) (hwfSource := hwfSource)
-      (attr := attr) hmem
-  obtain ⟨hcase⟩ := allAttrReceiverViews_member_case (hwfct := hwfct) hviewMem
-  exact hasType_attrAccess_of_case hbase hsub hcase
+    (hwfct : WellTypedClassHierarchy ct)
+    (source : WellFormedType (ct.map ClassDecl.name))
+    (hmem : result ∈ attrResultsFromTy hwfct source attr)
+    (hbase : HasType hwfct.toWellFormedClassHierarchy Γ base source.raw) :
+    HasType hwfct.toWellFormedClassHierarchy Γ (.attrAccess base attr) result.raw := by
+  obtain ⟨view, _, selected⟩ := List.mem_flatMap.mp hmem
+  haveI := WellFormedType.subtypeDecidable hwfct.toWellFormedClassHierarchy source view.receiver
+  split at selected
+  · rename_i included
+    cases List.mem_singleton.mp selected
+    exact hasType_attrAccess_of_case hbase included view.selection
+  · cases selected
 
+/-- An accepted packaged receiver view supplies its result directly. -/
 theorem attrResultsFromTy_complete_of_member
-    (hwfct : WellFormedClassTable ct)
-    (hsub : IsSubtype ct sourceTy viewTy)
-    (hviewMem : (viewTy, R) ∈ allAttrReceiverViews hwfct attr) :
-    R ∈ attrResultsFromTy hwfct sourceTy hwfSource attr := by
-  unfold attrResultsFromTy
-  simp [attrResultsFromEntry]
-  exact ⟨viewTy, hsub, hviewMem⟩
+    (hwfct : WellTypedClassHierarchy ct)
+    (source : WellFormedType (ct.map ClassDecl.name))
+    (hsub : IsSubtype hwfct.toWellFormedClassHierarchy source.raw view.receiver.raw)
+    (member : view ∈ attrReceiverViews hwfct attr) :
+    view.result ∈ attrResultsFromTy hwfct source attr := by
+  exact List.mem_flatMap.mpr ⟨view, member, by simp [hsub]⟩

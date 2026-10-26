@@ -5,7 +5,9 @@ import FwPython.Common.Identifier
 /-- A heap stores objects at numeric object IDs together with a fresh-ID
 counter. -/
 structure RuntimeHeap (Object : Type) where
+  /-- Objects stored at their numeric identifiers. Lookup selects the first matching entry. -/
   heapMap : List (Nat × Object)
+  /-- The identifier assigned by the next allocation. -/
   heapCounter : Nat
   deriving DecidableEq, Repr
 
@@ -93,5 +95,21 @@ theorem alloc_preserves_property_exhaustive
   split at hlook
   · exact absurd (Option.some.inj hlook ▸ hproperty) hnew
   · exact hold oid obj hlook hproperty
+
+/-- Allocation preserves an object property when the new object also satisfies it. -/
+theorem alloc_preserves_property
+    {h : RuntimeHeap Object} {newObj : Object} {oidNew : Nat} {h' : RuntimeHeap Object}
+    {Property : Object → Prop}
+    (halloc : h.alloc newObj = (oidNew, h'))
+    (hnew : Property newObj)
+    (hold : ∀ oid obj, h.lookup oid = some obj → Property obj) :
+    ∀ oid obj, h'.lookup oid = some obj → Property obj := by
+  unfold RuntimeHeap.alloc at halloc
+  obtain ⟨rfl, rfl⟩ := Prod.mk.inj halloc
+  intro oid obj lookup
+  simp only [RuntimeHeap.lookup, lookupList] at lookup
+  split at lookup
+  · exact Option.some.inj lookup ▸ hnew
+  · exact hold oid obj lookup
 
 end RuntimeHeap
